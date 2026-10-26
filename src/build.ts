@@ -5,7 +5,6 @@ import { KnowledgeDb } from "./db.js";
 import { ingestData, discoverLoadOrder } from "./ingest.js";
 import { ingestLocalizedText } from "./localize.js";
 import { buildEntityIndex } from "./entities.js";
-import { buildEmbeddings } from "./search.js";
 
 export interface BuildResult {
   dbFile: string;
@@ -13,7 +12,6 @@ export interface BuildResult {
   rowsInserted: number;
   textEntries: number;
   entityDocs: number;
-  embeddedDocs: number;
   durationMs: number;
   loadOrder: { id: string; dir: string }[];
 }
@@ -24,8 +22,8 @@ function fileCount(dir: string): number {
 }
 
 /**
- * Build the knowledge base: schema + data + localized text + entity index
- * + optional embeddings. Writes only to config.outputDir (never to game data).
+ * Build the knowledge base: schema + data + localized text + entity index.
+ * Writes only to config.outputDir (never to game data).
  */
 export async function build(config: Config, opts: { force?: boolean } = {}): Promise<BuildResult> {
   const t0 = Date.now();
@@ -54,7 +52,6 @@ export async function build(config: Config, opts: { force?: boolean } = {}): Pro
   let rowsInserted = 0;
   let textEntries = 0;
   let entityDocs = 0;
-  let embeddedDocs = 0;
 
   if (needsBuild) {
     const ing = ingestData(kb, config);
@@ -64,8 +61,7 @@ export async function build(config: Config, opts: { force?: boolean } = {}): Pro
     const loc = ingestLocalizedText(kb, config);
     textEntries = loc.entries;
 
-    entityDocs = buildEntityIndex(kb, config);
-    embeddedDocs = await buildEmbeddings(kb, config);
+    entityDocs = buildEntityIndex(kb);
 
     const meta = {
       builtAt: new Date().toISOString(),
@@ -75,7 +71,6 @@ export async function build(config: Config, opts: { force?: boolean } = {}): Pro
       rowsInserted,
       textEntries,
       entityDocs,
-      embeddedDocs,
       loadOrder: order.dataDirs,
     };
     kb.db.exec(`CREATE TABLE IF NOT EXISTS "_meta" ("key" TEXT PRIMARY KEY, "value" TEXT);`);
@@ -90,7 +85,6 @@ export async function build(config: Config, opts: { force?: boolean } = {}): Pro
       rowsInserted = m.rowsInserted;
       textEntries = m.textEntries;
       entityDocs = m.entityDocs;
-      embeddedDocs = m.embeddedDocs;
     }
     tables = kb.listTables().length;
   }
@@ -102,7 +96,6 @@ export async function build(config: Config, opts: { force?: boolean } = {}): Pro
     rowsInserted,
     textEntries,
     entityDocs,
-    embeddedDocs,
     durationMs: Date.now() - t0,
     loadOrder: order.dataDirs,
   };

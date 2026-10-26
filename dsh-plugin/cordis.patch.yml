@@ -1,0 +1,5 @@
+- insert:
+    - id: civi6-kb
+      name: '@local/civi6-kb'
+      config:
+        dbPath: /Users/zenghan/Documents/civi6/data/civi6.sqlite

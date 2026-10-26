@@ -1,7 +1,7 @@
 {
   "name": "civi6-kb-adapter",
   "version": "0.1.0",
-  "description": "Read-only knowledge-base adapter over local Civilization VI game data (relational SQLite + hybrid search + REST API)",
+  "description": "Civilization VI knowledge base: read-only SQLite build pipeline + DeepSeek Harness plugin (query tools)",
   "type": "module",
   "private": true,
   "engines": {
@@ -10,17 +10,12 @@
   "scripts": {
     "build": "tsx src/cli.ts build",
     "rebuild": "tsx src/cli.ts build --force",
-    "serve": "tsx src/cli.ts serve",
-    "search": "tsx src/cli.ts search",
-    "stats": "tsx src/cli.ts stats",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "express": "^4.19.2",
     "fast-xml-parser": "^4.4.1"
   },
   "devDependencies": {
-    "@types/express": "^4.17.21",
     "@types/node": "^22.5.0",
     "tsx": "^4.19.0",
     "typescript": "^5.5.4"

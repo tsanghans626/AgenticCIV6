@@ -24,10 +24,6 @@ export interface Config {
   outputDir: string;
   dbFile: string;
   langs: string[];
-  port: number;
-  host: string;
-  openaiApiKey: string | undefined;
-  openaiEmbeddingModel: string;
 }
 
 function readEnv(name: string): string | undefined {
@@ -101,9 +97,5 @@ export function loadConfig(): Config {
     outputDir,
     dbFile: join(outputDir, "civi6.sqlite"),
     langs,
-    port: Number(readEnv("PORT") ?? 8787),
-    host: readEnv("HOST") ?? "127.0.0.1",
-    openaiApiKey: readEnv("OPENAI_API_KEY"),
-    openaiEmbeddingModel: readEnv("OPENAI_EMBEDDING_MODEL") ?? "text-embedding-3-small",
   };
 }

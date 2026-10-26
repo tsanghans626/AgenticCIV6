@@ -1,6 +1,4 @@
 import type { KnowledgeDb } from "./db.js";
-import type { Config } from "./config.js";
-import { resolveModifiers } from "./modifiers.js";
 
 export type ModifierResolverName =
   | "direct"
@@ -177,16 +175,6 @@ export const SPECS: EntitySpec[] = [
   },
 ];
 
-const specByType = new Map(SPECS.map((s) => [s.type, s]));
-
-export function getSpec(type: string): EntitySpec | undefined {
-  return specByType.get(type);
-}
-
-export function listEntityTypes(): string[] {
-  return SPECS.map((s) => s.type);
-}
-
 /** Localize a text tag for a language (fallback to English, then raw tag). */
 export function localize(kb: KnowledgeDb, tag: unknown, lang: string): string | undefined {
   if (typeof tag !== "string" || tag.length === 0) return undefined;
@@ -201,18 +189,6 @@ export function localize(kb: KnowledgeDb, tag: unknown, lang: string): string | 
     if (en?.Text) return en.Text;
   }
   return undefined;
-}
-
-export function entityName(kb: KnowledgeDb, spec: EntitySpec, id: string, lang: string): string {
-  const row = kb.get<Record<string, unknown>>(`SELECT * FROM "${spec.table}" WHERE "${spec.pk}" = ?;`, id);
-  const tag = row?.Name ?? `${spec.loc}${id}_NAME`;
-  return localize(kb, tag, lang) ?? id;
-}
-
-export function entityDescription(kb: KnowledgeDb, spec: EntitySpec, id: string, lang: string): string | undefined {
-  const row = kb.get<Record<string, unknown>>(`SELECT * FROM "${spec.table}" WHERE "${spec.pk}" = ?;`, id);
-  const tag = row?.Description ?? `${spec.loc}${id}_DESCRIPTION`;
-  return localize(kb, tag, lang);
 }
 
 function yieldName(kb: KnowledgeDb, yieldType: string, lang: string): string {
@@ -314,7 +290,7 @@ function buildDoc(
 }
 
 /** Build the entity index: search_docs table + populated docs. Returns doc count. */
-export function buildEntityIndex(kb: KnowledgeDb, config: Config): number {
+export function buildEntityIndex(kb: KnowledgeDb): number {
   kb.db.exec(`
     CREATE TABLE IF NOT EXISTS "search_docs" (
       "id" TEXT PRIMARY KEY,
@@ -322,7 +298,6 @@ export function buildEntityIndex(kb: KnowledgeDb, config: Config): number {
       "name" TEXT,
       "name_zh" TEXT,
       "doc" TEXT,
-      "embedding" BLOB,
       "meta" TEXT
     );
   `);
@@ -352,140 +327,4 @@ export function buildEntityIndex(kb: KnowledgeDb, config: Config): number {
   return count;
 }
 
-/** List entities of a type with localized names, optional text filter. */
-export function listEntities(
-  kb: KnowledgeDb,
-  type: string,
-  opts: { limit?: number; offset?: number; q?: string; lang?: string } = {},
-): { total: number; items: Record<string, unknown>[] } {
-  const spec = getSpec(type);
-  if (!spec || !kb.hasTable(spec.table)) return { total: 0, items: [] };
-  const limit = Math.min(opts.limit ?? 100, 1000);
-  const offset = opts.offset ?? 0;
-  const lang = opts.lang ?? "zh_Hans_CN";
 
-  let where = "";
-  const params: string[] = [];
-  if (opts.q) {
-    where = `WHERE "${spec.pk}" LIKE ? OR "${spec.table}"."Name" LIKE ?`;
-    params.push(`%${opts.q}%`, `%${opts.q}%`);
-  }
-  const total = kb.get<{ n: number }>(`SELECT COUNT(*) AS n FROM "${spec.table}" ${where};`, ...params)?.n ?? 0;
-  const rows = kb.all<Record<string, unknown>>(
-    `SELECT * FROM "${spec.table}" ${where} ORDER BY "${spec.pk}" LIMIT ? OFFSET ?;`,
-    ...params,
-    limit,
-    offset,
-  );
-  const items = rows.map((row) => {
-    const id = String(row[spec.pk]);
-    return {
-      id,
-      type,
-      name: localize(kb, row.Name ?? `${spec.loc}${id}_NAME`, "en_US") ?? id,
-      name_zh: localize(kb, row.Name ?? `${spec.loc}${id}_NAME`, "zh_Hans_CN") ?? id,
-      ...row,
-    };
-  });
-  return { total, items };
-}
-
-/** Full detail for one entity: row + related tables + modifiers. */
-export function getEntityDetail(kb: KnowledgeDb, type: string, id: string, lang = "zh_Hans_CN") {
-  const spec = getSpec(type);
-  if (!spec || !kb.hasTable(spec.table)) return undefined;
-  const row = kb.get<Record<string, unknown>>(`SELECT * FROM "${spec.table}" WHERE "${spec.pk}" = ?;`, id);
-  if (!row) return undefined;
-
-  const related: Record<string, Record<string, unknown>[]> = {};
-  for (const r of spec.related) {
-    if (!kb.hasTable(r.table)) continue;
-    related[r.table] = kb.all<Record<string, unknown>>(`SELECT * FROM "${r.table}" WHERE "${r.fk}" = ?;`, id);
-  }
-
-  const modifierIds = collectModifierIds(kb, spec, id);
-  const modifiers = resolveModifiers(kb, modifierIds, lang);
-
-  return {
-    id,
-    type,
-    name: localize(kb, row.Name ?? `${spec.loc}${id}_NAME`, "en_US") ?? id,
-    name_zh: localize(kb, row.Name ?? `${spec.loc}${id}_NAME`, "zh_Hans_CN") ?? id,
-    description: row.Description ? (localize(kb, row.Description, "en_US") ?? null) : null,
-    description_zh: row.Description ? (localize(kb, row.Description, "zh_Hans_CN") ?? null) : null,
-    row,
-    related,
-    modifiers,
-  };
-}
-
-const DIRECT_MODIFIER_TABLE: Record<string, string> = {
-  building: "BuildingModifiers",
-  district: "DistrictModifiers",
-  trait: "TraitModifiers",
-  technology: "TechnologyModifiers",
-  civic: "CivicModifiers",
-  policy: "PolicyModifiers",
-  government: "GovernmentModifiers",
-  improvement: "ImprovementModifiers",
-};
-
-/** Collect ModifierIds linked to an entity (handles multi-hop). */
-export function collectModifierIds(kb: KnowledgeDb, spec: EntitySpec, id: string): string[] {
-  const direct = (table: string, fk: string) =>
-    kb.hasTable(table)
-      ? kb.all<{ ModifierId: string }>(`SELECT ModifierId FROM "${table}" WHERE "${fk}" = ?;`, id).map((r) => r.ModifierId)
-      : [];
-
-  switch (spec.modifierResolver) {
-    case "unit": {
-      // Units carry tags (TypeTags); abilities are tagged with the same tags.
-      const unitTags = kb.hasTable("TypeTags")
-        ? kb.all<{ Tag: string }>(`SELECT Tag FROM TypeTags WHERE Type = ?;`, id).map((r) => r.Tag)
-        : [];
-      if (unitTags.length === 0) return [];
-      const placeholders = unitTags.map(() => "?").join(",");
-      const abilities = kb.all<{ Type: string }>(
-        `SELECT Type FROM TypeTags WHERE Tag IN (${placeholders}) AND Type IN (SELECT UnitAbilityType FROM UnitAbilities);`,
-        ...unitTags,
-      );
-      if (abilities.length === 0) return [];
-      const aPlaceholders = abilities.map(() => "?").join(",");
-      return kb
-        .all<{ ModifierId: string }>(
-          `SELECT ModifierId FROM UnitAbilityModifiers WHERE UnitAbilityType IN (${aPlaceholders});`,
-          ...abilities.map((a) => a.Type),
-        )
-        .map((r) => r.ModifierId);
-    }
-    case "civilization": {
-      const tr = kb.hasTable("CivilizationTraits")
-        ? kb.all<{ TraitType: string }>(`SELECT TraitType FROM CivilizationTraits WHERE CivilizationType = ?;`, id)
-        : [];
-      const out: string[] = [];
-      for (const t of tr) out.push(...direct("TraitModifiers", "TraitType"));
-      return out;
-    }
-    case "leader": {
-      const tr = kb.hasTable("LeaderTraits")
-        ? kb.all<{ TraitType: string }>(`SELECT TraitType FROM LeaderTraits WHERE LeaderType = ?;`, id)
-        : [];
-      const out: string[] = [];
-      for (const t of tr) out.push(...direct("TraitModifiers", "TraitType"));
-      return out;
-    }
-    case "greatperson": {
-      return [
-        ...direct("GreatPersonIndividualBirthModifiers", "GreatPersonIndividualType"),
-        ...direct("GreatPersonIndividualActionModifiers", "GreatPersonIndividualType"),
-      ];
-    }
-    case "none":
-      return [];
-    case "direct":
-    default: {
-      const table = DIRECT_MODIFIER_TABLE[spec.type];
-      return table ? direct(table, spec.pk) : [];
-    }
-  }
-}
