@@ -78,13 +78,19 @@ export function resolveAssetsDir(): string {
   );
 }
 
-export function loadConfig(): Config {
-  const assets = resolveAssetsDir();
+/** Output settings only — usable without the game data (e.g. `reindex`). */
+export function loadOutputConfig(): Pick<Config, "outputDir" | "dbFile" | "langs"> {
   const outputDir = resolve(WORKSPACE_ROOT, readEnv("CIV6_OUTPUT") ?? "data");
   const langs = (readEnv("CIV6_LANGS") ?? "en_US,zh_Hans_CN")
     .split(",")
     .map((s) => s.trim())
     .filter(Boolean);
+  return { outputDir, dbFile: join(outputDir, "civi6.sqlite"), langs };
+}
+
+export function loadConfig(): Config {
+  const assets = resolveAssetsDir();
+  const { outputDir, dbFile, langs } = loadOutputConfig();
 
   return {
     paths: {
@@ -95,7 +101,7 @@ export function loadConfig(): Config {
       dlc: join(assets, "DLC"),
     },
     outputDir,
-    dbFile: join(outputDir, "civi6.sqlite"),
+    dbFile,
     langs,
   };
 }

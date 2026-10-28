@@ -5,6 +5,7 @@ import { KnowledgeDb } from "./db.js";
 import { ingestData, discoverLoadOrder } from "./ingest.js";
 import { ingestLocalizedText } from "./localize.js";
 import { buildEntityIndex } from "./entities.js";
+import { buildSearchIndex, buildStats, hasSearchIndex, type SearchIndexStats } from "./searchindex.js";
 
 export interface BuildResult {
   dbFile: string;
@@ -13,6 +14,7 @@ export interface BuildResult {
   textEntries: number;
   entityDocs: number;
   durationMs: number;
+  index?: SearchIndexStats;
   loadOrder: { id: string; dir: string }[];
 }
 
@@ -52,6 +54,7 @@ export async function build(config: Config, opts: { force?: boolean } = {}): Pro
   let rowsInserted = 0;
   let textEntries = 0;
   let entityDocs = 0;
+  let index: SearchIndexStats | undefined;
 
   if (needsBuild) {
     const ing = ingestData(kb, config);
@@ -62,6 +65,8 @@ export async function build(config: Config, opts: { force?: boolean } = {}): Pro
     textEntries = loc.entries;
 
     entityDocs = buildEntityIndex(kb);
+    index = buildSearchIndex(kb);
+    buildStats(kb);
 
     const meta = {
       builtAt: new Date().toISOString(),
@@ -87,6 +92,16 @@ export async function build(config: Config, opts: { force?: boolean } = {}): Pro
       entityDocs = m.entityDocs;
     }
     tables = kb.listTables().length;
+
+    // Databases built before the read-optimised index existed are upgraded in
+    // place instead of forcing a full rebuild from the game data.
+    if (!hasSearchIndex(kb)) {
+      console.log("检测到旧库，补齐检索索引与统计…");
+      index = buildSearchIndex(kb);
+      buildStats(kb);
+    } else if (!kb.get(`SELECT 1 FROM _meta WHERE key = 'stats';`)) {
+      buildStats(kb);
+    }
   }
 
   kb.close();
@@ -97,6 +112,7 @@ export async function build(config: Config, opts: { force?: boolean } = {}): Pro
     textEntries,
     entityDocs,
     durationMs: Date.now() - t0,
+    index,
     loadOrder: order.dataDirs,
   };
 }

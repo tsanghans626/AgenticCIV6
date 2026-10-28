@@ -5,11 +5,12 @@
   "type": "module",
   "private": true,
   "engines": {
-    "node": ">=22.5.0"
+    "node": ">=22.18.0"
   },
   "scripts": {
-    "build": "tsx src/cli.ts build",
-    "rebuild": "tsx src/cli.ts build --force",
+    "build": "node --import ./scripts/ts-loader.mjs src/cli.ts build",
+    "rebuild": "node --import ./scripts/ts-loader.mjs src/cli.ts build --force",
+    "reindex": "node --import ./scripts/ts-loader.mjs src/cli.ts reindex",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

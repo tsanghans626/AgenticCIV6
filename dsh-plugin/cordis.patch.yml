@@ -1,5 +1,7 @@
 - insert:
     - id: civi6-kb
-      name: '@local/civi6-kb'
+      name: "@local/civi6-kb"
       config:
-        dbPath: /Users/zenghan/Documents/civi6/data/civi6.sqlite
+        # 相对路径以插件目录（dsh-plugin/）为基准解析，因此换机器、换工作目录都不用改。
+        # 绝对值也可以直接写，例如 D:\Code\AgenticCIV6\data\civi6.sqlite
+        dbPath: ../data/civi6.sqlite
