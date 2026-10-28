@@ -4,7 +4,7 @@ import type { Config } from "./config.js";
 import type { KnowledgeDb } from "./db.js";
 import { parseXmlFile, rowToRecord, asArray } from "./xml.js";
 
-interface TextEntry {
+export interface TextEntry {
   tag: string;
   text: string;
   lang: string;
@@ -58,7 +58,10 @@ export function discoverTextFiles(config: Config): string[] {
 }
 
 /** Parse a text file into entries, splitting base text from localized text. */
-function parseTextFile(file: string): { base: TextEntry[]; localized: TextEntry[] } {
+export function parseTextFile(
+  file: string,
+  fallbackLang?: string,
+): { base: TextEntry[]; localized: TextEntry[] } {
   const base: TextEntry[] = [];
   const localized: TextEntry[] = [];
   let parsed;
@@ -69,7 +72,7 @@ function parseTextFile(file: string): { base: TextEntry[]; localized: TextEntry[
   }
   if (parsed.root !== "GameData" && parsed.root !== "GameInfo") return { base, localized };
 
-  const defaultLang = langFromPath(file);
+  const defaultLang = fallbackLang ?? langFromPath(file);
   for (const [, tableEl] of Object.entries(parsed.body)) {
     if (!tableEl || typeof tableEl !== "object") continue;
     const el = tableEl as Record<string, unknown>;
@@ -95,8 +98,8 @@ function parseTextFile(file: string): { base: TextEntry[]; localized: TextEntry[
   return { base, localized };
 }
 
-/** Ingest localized text into the LocalizedText table. */
-export function ingestLocalizedText(kb: KnowledgeDb, config: Config): { entries: number; files: number } {
+/** Create the LocalizedText table if needed (shared by the base and BBG builds). */
+export function ensureLocalizedTextTable(kb: KnowledgeDb): void {
   kb.db.exec(`
     CREATE TABLE IF NOT EXISTS "LocalizedText" (
       "Tag" TEXT NOT NULL,
@@ -106,28 +109,38 @@ export function ingestLocalizedText(kb: KnowledgeDb, config: Config): { entries:
       PRIMARY KEY("Tag","Language")
     );
   `);
+}
+
+/** Insert entries with INSERT OR REPLACE (later entries win within a language). */
+export function ingestTextEntries(kb: KnowledgeDb, entries: TextEntry[]): number {
+  if (entries.length === 0) return 0;
+  const ins = kb.db.prepare(
+    `INSERT OR REPLACE INTO "LocalizedText" ("Tag","Language","Text","Source") VALUES (?,?,?,?);`,
+  );
+  for (const e of entries) ins.run(e.tag, e.lang, e.text, e.source);
+  return entries.length;
+}
+
+/** Ingest one extra text file (used for BBG's lang/english.xml + chinese.xml). */
+export function ingestTextFile(kb: KnowledgeDb, file: string, fallbackLang: string): number {
+  const { base, localized } = parseTextFile(file, fallbackLang);
+  return ingestTextEntries(kb, [...base, ...localized]);
+}
+
+/** Ingest localized text into the LocalizedText table. */
+export function ingestLocalizedText(kb: KnowledgeDb, config: Config): { entries: number; files: number } {
+  ensureLocalizedTextTable(kb);
   const files = discoverTextFiles(config);
   let entries = 0;
 
   // Pass 1: base text (no explicit Language) -> resolved language (usually en_US).
   // Pass 2: localized text (explicit Language) -> overrides base within same lang.
-  const run = (list: TextEntry[]) => {
-    for (const e of list) {
-      kb.db
-        .prepare(
-          `INSERT OR REPLACE INTO "LocalizedText" ("Tag","Language","Text","Source") VALUES (?,?,?,?);`,
-        )
-        .run(e.tag, e.lang, e.text, e.source);
-      entries++;
-    }
-  };
-
   kb.begin();
   try {
     for (const f of files) {
       const { base, localized } = parseTextFile(f);
-      run(base);
-      run(localized);
+      entries += ingestTextEntries(kb, base);
+      entries += ingestTextEntries(kb, localized);
     }
   } finally {
     kb.commit();

@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "Civ6 Knowledge Base",
-    "description": "Query the local Civilization VI knowledge base: BM25 search, entity detail, modifier effect chains, and read-only SQL."
+    "description": "Query the local Civilization VI knowledge base (vanilla or BBG ruleset): BM25 search, entity detail, modifier effect chains, and read-only SQL."
   }
 }

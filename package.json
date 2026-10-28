@@ -10,7 +10,13 @@
   "scripts": {
     "build": "node --import ./scripts/ts-loader.mjs src/cli.ts build",
     "rebuild": "node --import ./scripts/ts-loader.mjs src/cli.ts build --force",
+    "build:bbg": "node --import ./scripts/ts-loader.mjs src/cli.ts build --source bbg",
+    "build:all": "node --import ./scripts/ts-loader.mjs src/cli.ts build --source all",
+    "rebuild:bbg": "node --import ./scripts/ts-loader.mjs src/cli.ts build --source bbg --force",
+    "fetch:bbg": "node --import ./scripts/ts-loader.mjs src/cli.ts fetch-bbg",
     "reindex": "node --import ./scripts/ts-loader.mjs src/cli.ts reindex",
+    "reindex:bbg": "node --import ./scripts/ts-loader.mjs src/cli.ts reindex --source bbg",
+    "verify": "node scripts/verify-sources.mjs",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

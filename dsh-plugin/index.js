@@ -9,6 +9,33 @@ export const inject = ["tools"];
 /** Directory of this plugin file; relative dbPath values are anchored here. */
 const PLUGIN_DIR = dirname(fileURLToPath(import.meta.url));
 
+/** The two ruleset databases the plugin can query. */
+const SOURCES = ["vanilla", "bbg"];
+const DEFAULT_DB_PATHS = {
+  vanilla: "../data/civi6.sqlite",
+  bbg: "../data/civi6-bbg.sqlite",
+};
+
+const SOURCE_PARAM = {
+  type: "string",
+  enum: SOURCES,
+  description:
+    "Which ruleset database to query: vanilla (原版) or bbg (BBG). Defaults to the configured data source.",
+};
+
+function withSource(properties) {
+  return { ...properties, source: SOURCE_PARAM };
+}
+
+/** Accept the canonical names plus the Chinese/aliased forms people type. */
+function normalizeSource(value) {
+  if (value === undefined || value === null || value === "") return undefined;
+  const source = String(value).trim().toLowerCase();
+  if (source === "vanilla" || source === "原版" || source === "base") return "vanilla";
+  if (source === "bbg" || source === "better balanced game") return "bbg";
+  throw new Error(`civi6-kb: unknown data source "${value}" (expected "vanilla" or "bbg")`);
+}
+
 /** Hard cap on the JSON a single tool call returns to the model (~3k tokens). */
 const MAX_OUTPUT_CHARS = 12000;
 
@@ -1050,17 +1077,30 @@ function makeTool(def) {
   };
 }
 
-function metaTool(getKb) {
+function metaTool(getKb, sourceInfo) {
   return makeTool({
     name: "civi6_meta",
     description:
-      "Knowledge-base metadata: build info, entity types with row counts, doc count. Cheap; use it once to see what exists. Pass verbose:true only when you truly need the full 450+ table inventory.",
+      "Knowledge-base metadata: build info, entity types with row counts, doc count. Also reports the active data source and which sources are available. Cheap; use it once to see what exists. Pass verbose:true only when you truly need the full 450+ table inventory.",
     parameters: {
       type: "object",
-      properties: { verbose: { type: "boolean", description: "Include the full table list with row counts." } },
+      properties: withSource({
+        verbose: { type: "boolean", description: "Include the full table list with row counts." },
+      }),
       required: [],
     },
-    execute: (args) => getKb().meta({ verbose: args.verbose === true }),
+    execute: (args) => {
+      const source = normalizeSource(args.source) ?? sourceInfo.defaultSource;
+      const kb = getKb(source);
+      const out = kb.meta({ verbose: args.verbose === true });
+      out.dataSource = source;
+      out.availableSources = SOURCES.map((name) => ({
+        source: name,
+        dbFile: sourceInfo.paths[name],
+        exists: existsSync(sourceInfo.paths[name]),
+      }));
+      return out;
+    },
   });
 }
 
@@ -1071,14 +1111,14 @@ function searchTool(getKb) {
       "Lexical (BM25) search over entity documents, Chinese + English, e.g. '学院 相邻加成' or 'nuclear weapon'. Returns ids you can feed straight into civi6_entity. Restrict with type to keep results on target.",
     parameters: {
       type: "object",
-      properties: {
+      properties: withSource({
         q: { type: "string", description: "Search query, Chinese or English." },
         type: { type: "string", enum: TYPE_ENUM, description: "Optional entity type to restrict results to." },
         limit: { type: "integer", description: "Max results, 1-100. Default 20." },
-      },
+      }),
       required: ["q"],
     },
-    execute: (args) => getKb().search(args.q ?? "", { type: args.type, limit: args.limit }),
+    execute: (args) => getKb(args.source).search(args.q ?? "", { type: args.type, limit: args.limit }),
   });
 }
 
@@ -1089,17 +1129,22 @@ function entitiesTool(getKb) {
       "List entities of one type with localized names and curated stats (id, name, name_zh, stats). Filter by id/name substring with q. Use full:true only when every raw column is needed; the default limit of 30 keeps responses small.",
     parameters: {
       type: "object",
-      properties: {
+      properties: withSource({
         type: { type: "string", enum: TYPE_ENUM, description: "Entity type." },
         q: { type: "string", description: "Optional substring filter on id or name." },
         limit: { type: "integer", description: "Max rows, 1-200. Default 30." },
         offset: { type: "integer", description: "Zero-based offset. Default 0." },
         full: { type: "boolean", description: "Return every raw column instead of the curated stats." },
-      },
+      }),
       required: ["type"],
     },
     execute: (args) =>
-      getKb().listEntities(args.type, { q: args.q, limit: args.limit, offset: args.offset, full: args.full === true }),
+      getKb(args.source).listEntities(args.type, {
+        q: args.q,
+        limit: args.limit,
+        offset: args.offset,
+        full: args.full === true,
+      }),
   });
 }
 
@@ -1110,7 +1155,7 @@ function entityTool(getKb) {
       "Detail for one or more entities: base row, related tables, and a one-line summary per modifier (modifierCount tells you how many there are). Accepts exact ids (DISTRICT_CAMPUS) or names (学院, resolved automatically); pass ids:[...] to fetch several at once instead of calling repeatedly. Use modifiers:'full' for the whole requirement/argument chain, or the civi6_modifiers tool for a paged chain.",
     parameters: {
       type: "object",
-      properties: {
+      properties: withSource({
         type: { type: "string", enum: TYPE_ENUM, description: "Entity type." },
         id: { type: "string", description: "One exact id or a name, e.g. DISTRICT_CAMPUS / 学院." },
         ids: {
@@ -1121,13 +1166,14 @@ function entityTool(getKb) {
         modifiers: {
           type: "string",
           enum: ["summary", "full", "none"],
-          description: "How much of the modifier chain to inline. Default summary; full inlines arguments and requirement sets.",
+          description:
+            "How much of the modifier chain to inline. Default summary; full inlines arguments and requirement sets.",
         },
-      },
+      }),
       required: ["type"],
     },
     execute: (args) => {
-      const kb = getKb();
+      const kb = getKb(args.source);
       const ids = Array.isArray(args.ids) && args.ids.length ? args.ids : args.id ? [args.id] : [];
       if (!ids.length) throw new Error("provide id or ids");
       const opts = { modifiers: args.modifiers === "full" ? "full" : args.modifiers === "none" ? "none" : "summary" };
@@ -1152,15 +1198,16 @@ function modifiersTool(getKb) {
       "Paged modifier/requirement effect chain for one entity (civilization abilities, leader traits, unit abilities, building/district/policy effects) with localized descriptions, arguments and requirement sets. Units can have dozens; page with offset/limit.",
     parameters: {
       type: "object",
-      properties: {
+      properties: withSource({
         type: { type: "string", enum: TYPE_ENUM, description: "Entity type." },
         id: { type: "string", description: "Exact entity id." },
         offset: { type: "integer", description: "Zero-based offset. Default 0." },
         limit: { type: "integer", description: "Max modifiers, 1-200. Default 50." },
-      },
+      }),
       required: ["type", "id"],
     },
-    execute: (args) => getKb().modifiers(args.type, args.id, { offset: args.offset, limit: args.limit }),
+    execute: (args) =>
+      getKb(args.source).modifiers(args.type, args.id, { offset: args.offset, limit: args.limit }),
   });
 }
 
@@ -1171,13 +1218,13 @@ function sqlTool(getKb) {
       "Read-only SQL (SELECT/WITH/EXPLAIN/PRAGMA) for precise numeric queries and table introspection, e.g. \"SELECT UnitType, Combat FROM Units WHERE Combat >= 60\". Write statements are rejected.",
     parameters: {
       type: "object",
-      properties: {
+      properties: withSource({
         sql: { type: "string", description: "Read-only SQL statement (SELECT/WITH/EXPLAIN/PRAGMA)." },
         limit: { type: "integer", description: "Max rows when no LIMIT is present, 1-1000. Default 100." },
-      },
+      }),
       required: ["sql"],
     },
-    execute: (args) => getKb().sql(args.sql ?? "", args.limit),
+    execute: (args) => getKb(args.source).sql(args.sql ?? "", args.limit),
   });
 }
 
@@ -1185,10 +1232,10 @@ function sqlTool(getKb) {
 // Host plugin entry
 // ---------------------------------------------------------------------------
 /**
- * Resolve the configured dbPath. Relative values are anchored to this plugin's
- * directory, so `../data/civi6.sqlite` means the same thing on every machine
- * and regardless of the host process cwd. A value that only exists relative to
- * the process cwd still works as a fallback.
+ * Resolve a configured database path. Relative values are anchored to this
+ * plugin's directory, so `../data/civi6.sqlite` / `../data/civi6-bbg.sqlite`
+ * mean the same thing on every machine and regardless of the host process cwd.
+ * A value that only exists relative to the process cwd still works as a fallback.
  */
 function resolveDbPath(configured) {
   if (!configured) return undefined;
@@ -1199,23 +1246,40 @@ function resolveDbPath(configured) {
 }
 
 export function apply(ctx, config = {}) {
-  const dbPath = resolveDbPath(config.dbPath || process.env.CIVI6_DB_PATH);
+  config = config ?? {};
 
-  let kb = null;
-  function getKb() {
-    if (kb) return kb;
-    if (!dbPath) {
-      throw new Error(
-        "civi6-kb: no database path configured. Set config.dbPath in the bundle patch " +
-          "(relative paths resolve against the plugin directory, e.g. ../data/civi6.sqlite) " +
-          "or set the CIVI6_DB_PATH environment variable.",
-      );
+  const paths = {};
+  for (const source of SOURCES) {
+    const configured =
+      (config.dbPaths && config.dbPaths[source]) ||
+      (source === "vanilla" ? config.dbPath : undefined) ||
+      (source === "vanilla" ? process.env.CIVI6_DB_PATH : process.env.CIVI6_BBG_DB_PATH) ||
+      DEFAULT_DB_PATHS[source];
+    paths[source] = resolveDbPath(configured);
+  }
+  const defaultSource = normalizeSource(config.dataSource ?? process.env.CIVI6_DATA_SOURCE) ?? "vanilla";
+
+  const kbCache = new Map();
+  function getKb(sourceArg) {
+    const source = normalizeSource(sourceArg) ?? defaultSource;
+    const cached = kbCache.get(source);
+    if (cached) return cached;
+    try {
+      const kb = createKnowledgeBase(paths[source]);
+      kbCache.set(source, kb);
+      return kb;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const hint =
+        source === "bbg"
+          ? ' Build it with "npm run build:bbg" (run "npm run fetch:bbg" first if BBG sources are missing).'
+          : ' Build it with "npm run build".';
+      throw new Error(`${message}${hint}`);
     }
-    kb = createKnowledgeBase(dbPath);
-    return kb;
   }
 
-  ctx.tools.register(metaTool(getKb));
+  const sourceInfo = { defaultSource, paths };
+  ctx.tools.register(metaTool(getKb, sourceInfo));
   ctx.tools.register(searchTool(getKb));
   ctx.tools.register(entitiesTool(getKb));
   ctx.tools.register(modifiersTool(getKb));
@@ -1223,10 +1287,13 @@ export function apply(ctx, config = {}) {
   ctx.tools.register(sqlTool(getKb));
 
   ctx.effect(() => () => {
-    try {
-      kb?.close();
-    } catch {
-      /* ignore */
+    for (const kb of kbCache.values()) {
+      try {
+        kb.close();
+      } catch {
+        /* ignore */
+      }
     }
+    kbCache.clear();
   });
 }

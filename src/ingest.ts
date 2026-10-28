@@ -19,6 +19,8 @@ export interface LoadOrder {
   schemaFiles: string[];
   /** ordered list of data XML files */
   dataFiles: string[];
+  /** earlier files with the same basename as a later file (shadowed by the later copy) */
+  shadowedFiles: string[];
 }
 
 /** DLC folders that are optional game modes rather than standard content. */
@@ -77,7 +79,27 @@ export function discoverLoadOrder(config: Config, opts: { skipScenarios?: boolea
     : [];
   schemaFiles.unshift(...baseSchemaFiles);
 
-  return { baseData: paths.baseData, baseSchema: paths.baseSchema, dataDirs, schemaFiles, dataFiles };
+  // Civ6's virtual file system lets a later expansion replace a same-named file
+  // wholesale (Expansion2 ships complete replacements for 67 Expansion1 data
+  // files). Loading both copies creates rows the live game never has and makes
+  // balance mods fail on primary-key updates, so keep only the last copy.
+  const lastByBasename = new Map<string, number>();
+  dataFiles.forEach((file, index) => lastByBasename.set(basename(file).toLowerCase(), index));
+  const shadowedFiles = dataFiles.filter(
+    (file, index) => lastByBasename.get(basename(file).toLowerCase()) !== index,
+  );
+  const effectiveDataFiles = dataFiles.filter(
+    (file, index) => lastByBasename.get(basename(file).toLowerCase()) === index,
+  );
+
+  return {
+    baseData: paths.baseData,
+    baseSchema: paths.baseSchema,
+    dataDirs,
+    schemaFiles,
+    dataFiles: effectiveDataFiles,
+    shadowedFiles,
+  };
 }
 
 function applyOps(kb: KnowledgeDb, table: string, ops: RowOp[]): { rows: number; updated: number; deleted: number } {

@@ -1,6 +1,6 @@
 {
   "name": "@local/civi6-kb",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
   "type": "module",
   "description": "Read-only Civilization VI knowledge-base tools (search, entities, modifiers, SQL) for DeepSeek Harness.",

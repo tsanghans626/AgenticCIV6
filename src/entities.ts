@@ -301,6 +301,9 @@ export function buildEntityIndex(kb: KnowledgeDb): number {
       "meta" TEXT
     );
   `);
+  // A BBG build starts from a copy of the vanilla DB; clear stale documents
+  // before rebuilding so deleted entities cannot linger.
+  kb.db.exec(`DELETE FROM "search_docs";`);
   const nameIndex = buildNameIndex(kb);
   const ins = kb.db.prepare(
     `INSERT OR REPLACE INTO "search_docs" ("id","type","name","name_zh","doc","meta") VALUES (?,?,?,?,?,?);`,

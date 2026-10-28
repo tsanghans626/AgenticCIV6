@@ -15,16 +15,32 @@ export function normalizeValue(v: unknown): DbValue {
   return JSON.stringify(v);
 }
 
+export interface KnowledgeDbOptions {
+  /**
+   * Civ6's SQLite build accepts double-quoted string literals. Node's
+   * node:sqlite disables that legacy behaviour by default, so the BBG builder
+   * opts back in for the game's SQL files.
+   */
+  doubleQuotedStringLiterals?: boolean;
+}
+
 export class KnowledgeDb {
   readonly db: DatabaseSync;
   /** in-memory cache of table -> known columns (primed lazily from the DB) */
   private columnCache = new Map<string, Set<string>>();
 
-  constructor(filePath: string) {
+  constructor(filePath: string, options: KnowledgeDbOptions = {}) {
     mkdirSync(dirname(filePath), { recursive: true });
-    this.db = new DatabaseSync(filePath);
+    this.db = new DatabaseSync(
+      filePath,
+      options.doubleQuotedStringLiterals ? { enableDoubleQuotedStringLiterals: true } : {},
+    );
     this.db.exec("PRAGMA journal_mode = OFF;");
     this.db.exec("PRAGMA synchronous = OFF;");
+    // The game schema and BBG's helper tables contain foreign keys that the
+    // read-only knowledge base does not need to enforce (and BBG's
+    // CustomPlacement references a non-unique Types.Hash).
+    this.db.exec("PRAGMA foreign_keys = OFF;");
   }
 
   close(): void {
