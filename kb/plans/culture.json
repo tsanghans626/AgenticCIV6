@@ -1,0 +1,199 @@
+{
+  "victoryId": "culture",
+  "nameZh": "文化胜利",
+  "burst": {
+    "turn": 260,
+    "eraId": "ERA_INFORMATION",
+    "window": 30,
+    "margin": 0.1,
+    "rationale": "旅游/回合持续高于对手国内游客增长；用伟人作品、奇观、国家公园与商路拉满旅游。",
+    "techs": [
+      { "id": "TECH_PRINTING", "role": "enabling" },
+      { "id": "TECH_RADIO", "role": "enabling" },
+      { "id": "TECH_COMPUTERS", "role": "enabling" }
+    ],
+    "civics": [
+      { "id": "CIVIC_HUMANISM", "role": "blocking", "rationale": "博物馆/伟人槽" },
+      { "id": "CIVIC_CONSERVATION", "role": "enabling", "rationale": "国家公园" },
+      { "id": "CIVIC_CULTURAL_HERITAGE", "role": "enabling" },
+      { "id": "CIVIC_OPERA_BALLET", "role": "enabling" },
+      { "id": "CIVIC_NATURAL_HISTORY", "role": "enabling" }
+    ],
+    "policies": [
+      { "id": "POLICY_AESTHETICS", "role": "enabling" },
+      { "id": "POLICY_GRAND_OPERA", "role": "enabling" },
+      { "id": "POLICY_TRADE_CONFEDERATION", "role": "enabling", "rationale": "商路旅游" }
+    ],
+    "governments": [
+      { "id": "GOVERNMENT_DEMOCRACY", "role": "enabling" }
+    ],
+    "districts": [
+      { "id": "DISTRICT_THEATER", "qty": 12, "role": "blocking", "rationale": "剧院广场是伟人作品与旅游的主载体" }
+    ],
+    "buildings": [
+      { "id": "BUILDING_MUSEUM_ART", "role": "blocking" },
+      { "id": "BUILDING_BROADCAST_CENTER", "role": "enabling" },
+      { "id": "BUILDING_AMPHITHEATER", "role": "enabling" }
+    ],
+    "metrics": [
+      { "dimension": "tourism_per_turn", "op": ">=", "value": 200, "role": "blocking", "sourceFlag": "empirical", "confidence": 0.45, "rationale": "T260 左右对 7 个对手的国际游客压制线" },
+      { "dimension": "domestic_tourists", "op": ">=", "value": 2000, "role": "enabling", "sourceFlag": "empirical", "confidence": 0.4 },
+      { "dimension": "culture_per_turn", "op": ">=", "value": 600, "role": "enabling", "sourceFlag": "empirical", "confidence": 0.5 },
+      { "dimension": "faith_per_turn", "op": ">=", "value": 50, "role": "support", "sourceFlag": "empirical", "confidence": 0.4, "rationale": "买伟人/自然学家" },
+      { "dimension": "great_person_points", "op": ">=", "value": 30, "role": "enabling", "sourceFlag": "empirical", "confidence": 0.4 }
+    ],
+    "infrastructure": {
+      "cities": 12,
+      "popPerCity": 9,
+      "perCity": {
+        "BUILDING_MUSEUM_ART": 1,
+        "BUILDING_BROADCAST_CENTER": 1,
+        "BUILDING_AMPHITHEATER": 1,
+        "BUILDING_MARKET": 1,
+        "BUILDING_BANK": 1,
+        "BUILDING_GRANARY": 1,
+        "BUILDING_MONUMENT": 1,
+        "BUILDING_ZOO": 1
+      },
+      "empire": {
+        "DISTRICT_THEATER": 12,
+        "DISTRICT_COMMERCIAL_HUB": 12,
+        "DISTRICT_ENTERTAINMENT_COMPLEX": 3
+      },
+      "perCityProd": 25,
+      "tradeRoutes": 10,
+      "goldPerRoute": 4,
+      "luxuries": 10,
+      "entertainmentAmenities": 8,
+      "housingPerCity": 9
+    }
+  },
+  "eras": [
+    {
+      "eraId": "ERA_ANCIENT",
+      "turnLo": 1,
+      "turnHi": 50,
+      "cities": { "lo": 3, "hi": 4 },
+      "population": { "lo": 15, "hi": 25 },
+      "science": { "lo": 8, "hi": 14 },
+      "culture": { "lo": 8, "hi": 14 },
+      "production": { "lo": 30, "hi": 50 },
+      "goldNet": { "lo": 0, "hi": 20 },
+      "techs": ["TECH_POTTERY", "TECH_WRITING"],
+      "civics": ["CIVIC_CODE_OF_LAWS", "CIVIC_CRAFTSMANSHIP"],
+      "buildings": ["BUILDING_MONUMENT"],
+      "districts": ["DISTRICT_THEATER"],
+      "notes": "先铺城，纪念碑与剧院占位"
+    },
+    {
+      "eraId": "ERA_CLASSICAL",
+      "turnLo": 45,
+      "turnHi": 95,
+      "cities": { "lo": 6, "hi": 9 },
+      "population": { "lo": 30, "hi": 50 },
+      "science": { "lo": 35, "hi": 70 },
+      "culture": { "lo": 40, "hi": 80 },
+      "production": { "lo": 80, "hi": 140 },
+      "goldNet": { "lo": 10, "hi": 30 },
+      "techs": ["TECH_CURRENCY"],
+      "civics": ["CIVIC_DRAMA_POETRY", "CIVIC_RECORDED_HISTORY", "CIVIC_POLITICAL_PHILOSOPHY"],
+      "buildings": ["BUILDING_AMPHITHEATER"],
+      "districts": ["DISTRICT_COMMERCIAL_HUB"],
+      "notes": "古罗马剧场/市场"
+    },
+    {
+      "eraId": "ERA_MEDIEVAL",
+      "turnLo": 90,
+      "turnHi": 140,
+      "cities": { "lo": 8, "hi": 12 },
+      "population": { "lo": 45, "hi": 75 },
+      "science": { "lo": 80, "hi": 150 },
+      "culture": { "lo": 100, "hi": 180 },
+      "production": { "lo": 150, "hi": 250 },
+      "goldNet": { "lo": 20, "hi": 50 },
+      "techs": ["TECH_EDUCATION"],
+      "civics": ["CIVIC_CIVIL_SERVICE", "CIVIC_GUILDS"],
+      "buildings": ["BUILDING_UNIVERSITY"],
+      "districts": ["DISTRICT_THEATER"],
+      "notes": "博物馆前置与伟人点布局"
+    },
+    {
+      "eraId": "ERA_RENAISSANCE",
+      "turnLo": 135,
+      "turnHi": 185,
+      "cities": { "lo": 10, "hi": 14 },
+      "population": { "lo": 65, "hi": 105 },
+      "science": { "lo": 180, "hi": 300 },
+      "culture": { "lo": 200, "hi": 320 },
+      "production": { "lo": 240, "hi": 380 },
+      "goldNet": { "lo": 30, "hi": 70 },
+      "techs": ["TECH_PRINTING", "TECH_BANKING"],
+      "civics": ["CIVIC_HUMANISM", "CIVIC_EXPLORATION", "CIVIC_THE_ENLIGHTENMENT"],
+      "buildings": ["BUILDING_MUSEUM_ART"],
+      "districts": ["DISTRICT_THEATER"],
+      "notes": "博物馆 + 美学政策"
+    },
+    {
+      "eraId": "ERA_INDUSTRIAL",
+      "turnLo": 180,
+      "turnHi": 215,
+      "cities": { "lo": 11, "hi": 14 },
+      "population": { "lo": 85, "hi": 130 },
+      "science": { "lo": 300, "hi": 480 },
+      "culture": { "lo": 320, "hi": 500 },
+      "production": { "lo": 320, "hi": 500 },
+      "goldNet": { "lo": 40, "hi": 90 },
+      "techs": ["TECH_INDUSTRIALIZATION"],
+      "civics": ["CIVIC_NATIONALISM", "CIVIC_NATURAL_HISTORY", "CIVIC_URBANIZATION"],
+      "buildings": ["BUILDING_MUSEUM_ART"],
+      "districts": ["DISTRICT_THEATER"],
+      "notes": "考古/国家公园"
+    },
+    {
+      "eraId": "ERA_MODERN",
+      "turnLo": 210,
+      "turnHi": 240,
+      "cities": { "lo": 12, "hi": 15 },
+      "population": { "lo": 95, "hi": 140 },
+      "science": { "lo": 450, "hi": 650 },
+      "culture": { "lo": 450, "hi": 650 },
+      "production": { "lo": 420, "hi": 620 },
+      "goldNet": { "lo": 50, "hi": 110 },
+      "techs": ["TECH_RADIO"],
+      "civics": ["CIVIC_IDEOLOGY", "CIVIC_CONSERVATION"],
+      "buildings": ["BUILDING_BROADCAST_CENTER"],
+      "districts": ["DISTRICT_THEATER"],
+      "notes": "广播中心/国家公园"
+    },
+    {
+      "eraId": "ERA_ATOMIC",
+      "turnLo": 235,
+      "turnHi": 255,
+      "cities": { "lo": 12, "hi": 15 },
+      "population": { "lo": 100, "hi": 150 },
+      "science": { "lo": 600, "hi": 900 },
+      "culture": { "lo": 600, "hi": 900 },
+      "production": { "lo": 500, "hi": 750 },
+      "goldNet": { "lo": 60, "hi": 130 },
+      "techs": ["TECH_COMPUTERS"],
+      "civics": ["CIVIC_CULTURAL_HERITAGE", "CIVIC_OPERA_BALLET"],
+      "buildings": ["BUILDING_BROADCAST_CENTER"],
+      "districts": ["DISTRICT_THEATER"],
+      "notes": "旅游进入爆发"
+    },
+    {
+      "eraId": "ERA_INFORMATION",
+      "turnLo": 250,
+      "turnHi": 280,
+      "cities": { "lo": 12, "hi": 15 },
+      "population": { "lo": 100, "hi": 150 },
+      "science": { "lo": 800, "hi": 1200 },
+      "culture": { "lo": 900, "hi": 1400 },
+      "production": { "lo": 650, "hi": 950 },
+      "goldNet": { "lo": 70, "hi": 150 },
+      "civics": ["CIVIC_GLOBALIZATION"],
+      "policies": ["POLICY_GRAND_OPERA", "POLICY_TRADE_CONFEDERATION"],
+      "notes": "国际游客超过对手国内游客"
+    }
+  ]
+}

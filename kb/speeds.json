@@ -1,0 +1,14 @@
+[
+  {
+    "speed": "standard",
+    "labelZh": "标准",
+    "totalTurns": 500,
+    "costMultiplier": 100
+  },
+  {
+    "speed": "online",
+    "labelZh": "联机",
+    "totalTurns": 250,
+    "costMultiplier": 50
+  }
+]

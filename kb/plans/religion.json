@@ -1,0 +1,188 @@
+{
+  "victoryId": "religion",
+  "nameZh": "宗教胜利",
+  "burst": {
+    "turn": 225,
+    "eraId": "ERA_INDUSTRIAL",
+    "window": 25,
+    "margin": 0.1,
+    "rationale": "每个文明 >50% 城市改宗；用使徒/传教士批量改宗，信仰经济支撑单位采购。",
+    "techs": [
+      { "id": "TECH_ASTROLOGY", "role": "enabling" }
+    ],
+    "civics": [
+      { "id": "CIVIC_MYSTICISM", "role": "enabling" },
+      { "id": "CIVIC_THEOLOGY", "role": "enabling" },
+      { "id": "CIVIC_DIVINE_RIGHT", "role": "enabling" },
+      { "id": "CIVIC_REFORMED_CHURCH", "role": "enabling" }
+    ],
+    "policies": [
+      { "id": "POLICY_SCRIPTURE", "role": "enabling" },
+      { "id": "POLICY_CHARISMATIC_LEADER", "role": "enabling" }
+    ],
+    "governments": [
+      { "id": "GOVERNMENT_THEOCRACY", "role": "enabling", "rationale": "信仰购买军事/宗教单位" }
+    ],
+    "districts": [
+      { "id": "DISTRICT_HOLY_SITE", "qty": 10, "role": "blocking", "rationale": "信仰与使徒产能来源" }
+    ],
+    "buildings": [
+      { "id": "BUILDING_SHRINE", "qty": 10, "role": "enabling" },
+      { "id": "BUILDING_TEMPLE", "qty": 10, "role": "enabling" },
+      { "id": "BUILDING_CATHEDRAL", "qty": 10, "role": "support" }
+    ],
+    "units": [
+      { "id": "UNIT_APOSTLE", "qty": 12, "role": "blocking", "rationale": "主力改宗/神学战斗" },
+      { "id": "UNIT_MISSIONARY", "qty": 8, "role": "enabling" },
+      { "id": "UNIT_INQUISITOR", "qty": 4, "role": "support" }
+    ],
+    "metrics": [
+      { "dimension": "faith_per_turn", "op": ">=", "value": 200, "role": "blocking", "sourceFlag": "empirical", "confidence": 0.45, "rationale": "支撑使徒/传教士持续采购" },
+      { "dimension": "faith_stock", "op": ">=", "value": 2000, "role": "enabling", "sourceFlag": "empirical", "confidence": 0.4 },
+      { "dimension": "converted_civs", "op": ">=", "value": 7, "role": "blocking", "sourceFlag": "rule", "confidence": 0.6, "rationale": "每个其他文明 >50% 城市" },
+      { "dimension": "cities", "op": ">=", "value": 10, "role": "enabling", "sourceFlag": "empirical", "confidence": 0.5 }
+    ],
+    "infrastructure": {
+      "cities": 10,
+      "popPerCity": 7,
+      "perCity": {
+        "BUILDING_SHRINE": 1,
+        "BUILDING_TEMPLE": 1,
+        "BUILDING_CATHEDRAL": 1,
+        "BUILDING_GRANARY": 1,
+        "BUILDING_MONUMENT": 1
+      },
+      "empire": {
+        "DISTRICT_HOLY_SITE": 10,
+        "DISTRICT_COMMERCIAL_HUB": 8
+      },
+      "perCityProd": 25,
+      "tradeRoutes": 6,
+      "goldPerRoute": 3,
+      "luxuries": 7,
+      "entertainmentAmenities": 4,
+      "housingPerCity": 9
+    }
+  },
+  "eras": [
+    {
+      "eraId": "ERA_ANCIENT",
+      "turnLo": 1,
+      "turnHi": 50,
+      "cities": { "lo": 3, "hi": 4 },
+      "population": { "lo": 15, "hi": 25 },
+      "science": { "lo": 8, "hi": 14 },
+      "culture": { "lo": 5, "hi": 10 },
+      "faith": { "lo": 5, "hi": 15 },
+      "production": { "lo": 30, "hi": 50 },
+      "goldNet": { "lo": 0, "hi": 20 },
+      "techs": ["TECH_ASTROLOGY", "TECH_POTTERY"],
+      "civics": ["CIVIC_CODE_OF_LAWS", "CIVIC_MYSTICISM"],
+      "buildings": ["BUILDING_SHRINE"],
+      "districts": ["DISTRICT_HOLY_SITE"],
+      "notes": "发教/万神殿"
+    },
+    {
+      "eraId": "ERA_CLASSICAL",
+      "turnLo": 45,
+      "turnHi": 95,
+      "cities": { "lo": 5, "hi": 8 },
+      "population": { "lo": 25, "hi": 45 },
+      "science": { "lo": 30, "hi": 60 },
+      "culture": { "lo": 25, "hi": 50 },
+      "faith": { "lo": 20, "hi": 40 },
+      "production": { "lo": 70, "hi": 120 },
+      "goldNet": { "lo": 5, "hi": 25 },
+      "civics": ["CIVIC_THEOLOGY", "CIVIC_POLITICAL_PHILOSOPHY"],
+      "buildings": ["BUILDING_TEMPLE"],
+      "districts": ["DISTRICT_HOLY_SITE"],
+      "notes": "寺庙与第一批使徒"
+    },
+    {
+      "eraId": "ERA_MEDIEVAL",
+      "turnLo": 90,
+      "turnHi": 140,
+      "cities": { "lo": 7, "hi": 10 },
+      "population": { "lo": 40, "hi": 65 },
+      "science": { "lo": 60, "hi": 120 },
+      "culture": { "lo": 50, "hi": 100 },
+      "faith": { "lo": 50, "hi": 90 },
+      "production": { "lo": 120, "hi": 200 },
+      "goldNet": { "lo": 10, "hi": 35 },
+      "civics": ["CIVIC_DIVINE_RIGHT"],
+      "buildings": ["BUILDING_CATHEDRAL"],
+      "districts": ["DISTRICT_HOLY_SITE"],
+      "notes": "神权政体与崇拜建筑"
+    },
+    {
+      "eraId": "ERA_RENAISSANCE",
+      "turnLo": 135,
+      "turnHi": 185,
+      "cities": { "lo": 8, "hi": 11 },
+      "population": { "lo": 50, "hi": 80 },
+      "science": { "lo": 100, "hi": 180 },
+      "culture": { "lo": 90, "hi": 160 },
+      "faith": { "lo": 90, "hi": 150 },
+      "production": { "lo": 180, "hi": 300 },
+      "goldNet": { "lo": 20, "hi": 50 },
+      "civics": ["CIVIC_REFORMED_CHURCH"],
+      "buildings": ["BUILDING_CATHEDRAL"],
+      "districts": ["DISTRICT_HOLY_SITE"],
+      "notes": "使徒/审判官产能成型"
+    },
+    {
+      "eraId": "ERA_INDUSTRIAL",
+      "turnLo": 180,
+      "turnHi": 215,
+      "cities": { "lo": 9, "hi": 12 },
+      "population": { "lo": 60, "hi": 90 },
+      "science": { "lo": 180, "hi": 300 },
+      "culture": { "lo": 160, "hi": 280 },
+      "faith": { "lo": 150, "hi": 250 },
+      "production": { "lo": 250, "hi": 400 },
+      "goldNet": { "lo": 30, "hi": 70 },
+      "civics": ["CIVIC_REFORMED_CHURCH"],
+      "policies": ["POLICY_SCRIPTURE", "POLICY_CHARISMATIC_LEADER"],
+      "notes": "改宗进入不可逆阶段"
+    },
+    {
+      "eraId": "ERA_MODERN",
+      "turnLo": 210,
+      "turnHi": 240,
+      "cities": { "lo": 10, "hi": 13 },
+      "population": { "lo": 65, "hi": 100 },
+      "science": { "lo": 250, "hi": 400 },
+      "culture": { "lo": 220, "hi": 360 },
+      "faith": { "lo": 200, "hi": 320 },
+      "production": { "lo": 300, "hi": 480 },
+      "goldNet": { "lo": 40, "hi": 90 },
+      "notes": "补最后 1-2 个文明"
+    },
+    {
+      "eraId": "ERA_ATOMIC",
+      "turnLo": 235,
+      "turnHi": 255,
+      "cities": { "lo": 10, "hi": 13 },
+      "population": { "lo": 70, "hi": 105 },
+      "science": { "lo": 350, "hi": 550 },
+      "culture": { "lo": 300, "hi": 480 },
+      "faith": { "lo": 240, "hi": 380 },
+      "production": { "lo": 350, "hi": 550 },
+      "goldNet": { "lo": 50, "hi": 100 },
+      "notes": "宗教胜利通常已在此前完成"
+    },
+    {
+      "eraId": "ERA_INFORMATION",
+      "turnLo": 250,
+      "turnHi": 280,
+      "cities": { "lo": 10, "hi": 13 },
+      "population": { "lo": 70, "hi": 110 },
+      "science": { "lo": 450, "hi": 700 },
+      "culture": { "lo": 400, "hi": 600 },
+      "faith": { "lo": 300, "hi": 450 },
+      "production": { "lo": 400, "hi": 650 },
+      "goldNet": { "lo": 60, "hi": 120 },
+      "notes": "兜底阶段；若仍未胜利说明改宗预算不足"
+    }
+  ]
+}

@@ -1,0 +1,10 @@
+[
+  { "eraId": "ERA_ANCIENT", "eraIndex": 1, "turnLo": 1, "turnHi": 50, "assumedWindow": 50 },
+  { "eraId": "ERA_CLASSICAL", "eraIndex": 2, "turnLo": 45, "turnHi": 95, "assumedWindow": 45 },
+  { "eraId": "ERA_MEDIEVAL", "eraIndex": 3, "turnLo": 90, "turnHi": 140, "assumedWindow": 45 },
+  { "eraId": "ERA_RENAISSANCE", "eraIndex": 4, "turnLo": 135, "turnHi": 185, "assumedWindow": 50 },
+  { "eraId": "ERA_INDUSTRIAL", "eraIndex": 5, "turnLo": 180, "turnHi": 215, "assumedWindow": 35 },
+  { "eraId": "ERA_MODERN", "eraIndex": 6, "turnLo": 210, "turnHi": 240, "assumedWindow": 30 },
+  { "eraId": "ERA_ATOMIC", "eraIndex": 7, "turnLo": 235, "turnHi": 255, "assumedWindow": 20 },
+  { "eraId": "ERA_INFORMATION", "eraIndex": 8, "turnLo": 250, "turnHi": 280, "assumedWindow": 30 }
+]

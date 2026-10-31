@@ -1,0 +1,219 @@
+{
+  "victoryId": "science",
+  "nameZh": "科技胜利",
+  "burst": {
+    "turn": 250,
+    "eraId": "ERA_INFORMATION",
+    "window": 30,
+    "margin": 0.1,
+    "rationale": "全部航天项目在 30 回合内完成，且宇航中心就位；此后进入不可逆阶段。",
+    "projects": [
+      { "id": "PROJECT_LAUNCH_EARTH_SATELLITE", "qty": 1, "role": "blocking" },
+      { "id": "PROJECT_LAUNCH_MOON_LANDING", "qty": 1, "role": "blocking" },
+      { "id": "PROJECT_LAUNCH_MARS_BASE", "qty": 1, "role": "blocking" },
+      { "id": "PROJECT_LAUNCH_MARS_HABITATION", "qty": 1, "role": "blocking" },
+      { "id": "PROJECT_LAUNCH_MARS_HYDROPONICS", "qty": 1, "role": "blocking" },
+      { "id": "PROJECT_LAUNCH_MARS_REACTOR", "qty": 1, "role": "blocking" },
+      { "id": "PROJECT_LAUNCH_EXOPLANET_EXPEDITION", "qty": 1, "role": "blocking" }
+    ],
+    "districts": [
+      { "id": "DISTRICT_SPACEPORT", "qty": 1, "role": "blocking", "rationale": "所有航天项目的唯一承载区域" }
+    ],
+    "techs": [
+      { "id": "TECH_ROCKETRY", "role": "blocking" },
+      { "id": "TECH_SATELLITES", "role": "blocking" },
+      { "id": "TECH_NANOTECHNOLOGY", "role": "blocking" },
+      { "id": "TECH_ROBOTICS", "role": "blocking" },
+      { "id": "TECH_NUCLEAR_FUSION", "role": "blocking" },
+      { "id": "TECH_SMART_MATERIALS", "role": "blocking" },
+      { "id": "TECH_OFFWORLD_MISSION", "role": "blocking" }
+    ],
+    "civics": [
+      { "id": "CIVIC_SPACE_RACE", "role": "enabling" },
+      { "id": "CIVIC_IDEOLOGY", "role": "enabling" },
+      { "id": "CIVIC_GLOBALIZATION", "role": "enabling" }
+    ],
+    "policies": [
+      { "id": "POLICY_INTEGRATED_SPACE_CELL", "role": "enabling", "rationale": "航天项目 +% 锤" },
+      { "id": "POLICY_FIVE_YEAR_PLAN", "role": "enabling" },
+      { "id": "POLICY_RATIONALISM", "role": "enabling" },
+      { "id": "POLICY_NATURAL_PHILOSOPHY", "role": "enabling" }
+    ],
+    "governments": [
+      { "id": "GOVERNMENT_COMMUNISM", "role": "enabling", "rationale": "全城 +10% 锤" }
+    ],
+    "buildings": [
+      { "id": "BUILDING_LIBRARY", "role": "enabling" },
+      { "id": "BUILDING_UNIVERSITY", "role": "enabling" },
+      { "id": "BUILDING_RESEARCH_LAB", "role": "enabling" }
+    ],
+    "units": [
+      { "id": "UNIT_INFANTRY", "qty": 6, "role": "support", "rationale": "本土防御下限" }
+    ],
+    "metrics": [
+      { "dimension": "science_per_turn", "op": ">=", "value": 420, "role": "enabling", "sourceFlag": "empirical", "confidence": 0.5, "rationale": "信息时代科技闭包 / 30 回合窗口" },
+      { "dimension": "culture_per_turn", "op": ">=", "value": 550, "role": "enabling", "sourceFlag": "empirical", "confidence": 0.5, "rationale": "信息时代市政闭包 / 30 回合窗口" },
+      { "dimension": "faith_per_turn", "op": ">=", "value": 20, "role": "optional", "sourceFlag": "empirical", "confidence": 0.4, "rationale": "信仰买航天大工/工人" }
+    ],
+    "infrastructure": {
+      "cities": 13,
+      "popPerCity": 8,
+      "perCity": {
+        "BUILDING_LIBRARY": 1,
+        "BUILDING_UNIVERSITY": 1,
+        "BUILDING_RESEARCH_LAB": 1,
+        "BUILDING_MARKET": 1,
+        "BUILDING_BANK": 1,
+        "BUILDING_STOCK_EXCHANGE": 1,
+        "BUILDING_GRANARY": 1,
+        "BUILDING_MONUMENT": 1
+      },
+      "empire": {
+        "DISTRICT_CAMPUS": 13,
+        "DISTRICT_COMMERCIAL_HUB": 13,
+        "DISTRICT_INDUSTRIAL_ZONE": 4,
+        "DISTRICT_SPACEPORT": 1,
+        "BUILDING_FACTORY": 4,
+        "BUILDING_POWER_PLANT": 4
+      },
+      "units": {
+        "UNIT_INFANTRY": 6
+      },
+      "perCityProd": 40,
+      "tradeRoutes": 8,
+      "goldPerRoute": 3,
+      "luxuries": 8,
+      "entertainmentAmenities": 8,
+      "housingPerCity": 9
+    }
+  },
+  "eras": [
+    {
+      "eraId": "ERA_ANCIENT",
+      "turnLo": 1,
+      "turnHi": 50,
+      "cities": { "lo": 3, "hi": 4 },
+      "population": { "lo": 15, "hi": 25 },
+      "science": { "lo": 9, "hi": 15 },
+      "culture": { "lo": 5, "hi": 10 },
+      "production": { "lo": 30, "hi": 50 },
+      "goldNet": { "lo": 0, "hi": 20 },
+      "techs": ["TECH_POTTERY", "TECH_WRITING", "TECH_MINING"],
+      "civics": ["CIVIC_CODE_OF_LAWS", "CIVIC_CRAFTSMANSHIP", "CIVIC_FOREIGN_TRADE"],
+      "buildings": ["BUILDING_MONUMENT", "BUILDING_GRANARY"],
+      "districts": ["DISTRICT_CAMPUS"],
+      "notes": "T50 前 3-4 城、学院 1-2 座"
+    },
+    {
+      "eraId": "ERA_CLASSICAL",
+      "turnLo": 45,
+      "turnHi": 95,
+      "cities": { "lo": 6, "hi": 9 },
+      "population": { "lo": 30, "hi": 50 },
+      "science": { "lo": 40, "hi": 80 },
+      "culture": { "lo": 30, "hi": 60 },
+      "production": { "lo": 80, "hi": 140 },
+      "goldNet": { "lo": 10, "hi": 30 },
+      "techs": ["TECH_CURRENCY", "TECH_IRON_WORKING"],
+      "civics": ["CIVIC_POLITICAL_PHILOSOPHY", "CIVIC_DRAMA_POETRY", "CIVIC_RECORDED_HISTORY"],
+      "buildings": ["BUILDING_LIBRARY", "BUILDING_MARKET"],
+      "districts": ["DISTRICT_COMMERCIAL_HUB", "DISTRICT_THEATER"],
+      "notes": "T1 政体与图书馆/市场落地"
+    },
+    {
+      "eraId": "ERA_MEDIEVAL",
+      "turnLo": 90,
+      "turnHi": 140,
+      "cities": { "lo": 8, "hi": 12 },
+      "population": { "lo": 50, "hi": 80 },
+      "science": { "lo": 100, "hi": 200 },
+      "culture": { "lo": 80, "hi": 150 },
+      "production": { "lo": 160, "hi": 260 },
+      "goldNet": { "lo": 20, "hi": 50 },
+      "techs": ["TECH_EDUCATION", "TECH_APPRENTICESHIP"],
+      "civics": ["CIVIC_CIVIL_SERVICE", "CIVIC_FEUDALISM", "CIVIC_GUILDS"],
+      "buildings": ["BUILDING_UNIVERSITY", "BUILDING_WORKSHOP"],
+      "districts": ["DISTRICT_INDUSTRIAL_ZONE"],
+      "notes": "T100 8-12 城、大学开始普及"
+    },
+    {
+      "eraId": "ERA_RENAISSANCE",
+      "turnLo": 135,
+      "turnHi": 185,
+      "cities": { "lo": 10, "hi": 14 },
+      "population": { "lo": 70, "hi": 110 },
+      "science": { "lo": 200, "hi": 350 },
+      "culture": { "lo": 150, "hi": 250 },
+      "production": { "lo": 250, "hi": 400 },
+      "goldNet": { "lo": 30, "hi": 70 },
+      "techs": ["TECH_PRINTING", "TECH_BANKING"],
+      "civics": ["CIVIC_EXPLORATION", "CIVIC_HUMANISM", "CIVIC_THE_ENLIGHTENMENT"],
+      "buildings": ["BUILDING_BANK"],
+      "districts": ["DISTRICT_THEATER"],
+      "notes": "启蒙运动必到（理性主义）"
+    },
+    {
+      "eraId": "ERA_INDUSTRIAL",
+      "turnLo": 180,
+      "turnHi": 215,
+      "cities": { "lo": 12, "hi": 15 },
+      "population": { "lo": 90, "hi": 140 },
+      "science": { "lo": 350, "hi": 550 },
+      "culture": { "lo": 250, "hi": 400 },
+      "production": { "lo": 350, "hi": 550 },
+      "goldNet": { "lo": 40, "hi": 90 },
+      "techs": ["TECH_INDUSTRIALIZATION", "TECH_SCIENTIFIC_THEORY"],
+      "civics": ["CIVIC_URBANIZATION", "CIVIC_NATIONALISM"],
+      "buildings": ["BUILDING_FACTORY", "BUILDING_POWER_PLANT"],
+      "districts": ["DISTRICT_INDUSTRIAL_ZONE"],
+      "notes": "工业区发电化启动"
+    },
+    {
+      "eraId": "ERA_MODERN",
+      "turnLo": 210,
+      "turnHi": 240,
+      "cities": { "lo": 13, "hi": 16 },
+      "population": { "lo": 100, "hi": 150 },
+      "science": { "lo": 550, "hi": 800 },
+      "culture": { "lo": 400, "hi": 600 },
+      "production": { "lo": 450, "hi": 700 },
+      "goldNet": { "lo": 50, "hi": 110 },
+      "techs": ["TECH_ELECTRICITY", "TECH_CHEMISTRY"],
+      "civics": ["CIVIC_IDEOLOGY"],
+      "buildings": ["BUILDING_RESEARCH_LAB"],
+      "districts": ["DISTRICT_SPACEPORT"],
+      "notes": "实验室普及；T3 政体"
+    },
+    {
+      "eraId": "ERA_ATOMIC",
+      "turnLo": 235,
+      "turnHi": 255,
+      "cities": { "lo": 13, "hi": 16 },
+      "population": { "lo": 100, "hi": 160 },
+      "science": { "lo": 800, "hi": 1200 },
+      "culture": { "lo": 600, "hi": 900 },
+      "production": { "lo": 550, "hi": 850 },
+      "goldNet": { "lo": 60, "hi": 130 },
+      "techs": ["TECH_ROCKETRY", "TECH_SATELLITES"],
+      "civics": ["CIVIC_SPACE_RACE"],
+      "districts": ["DISTRICT_SPACEPORT"],
+      "buildings": ["BUILDING_RESEARCH_LAB"],
+      "notes": "宇航中心开始建设"
+    },
+    {
+      "eraId": "ERA_INFORMATION",
+      "turnLo": 250,
+      "turnHi": 280,
+      "cities": { "lo": 13, "hi": 16 },
+      "population": { "lo": 100, "hi": 160 },
+      "science": { "lo": 1200, "hi": 1800 },
+      "culture": { "lo": 900, "hi": 1400 },
+      "production": { "lo": 700, "hi": 1100 },
+      "goldNet": { "lo": 70, "hi": 150 },
+      "techs": ["TECH_NANOTECHNOLOGY", "TECH_ROBOTICS", "TECH_SMART_MATERIALS", "TECH_OFFWORLD_MISSION"],
+      "civics": ["CIVIC_GLOBALIZATION"],
+      "policies": ["POLICY_INTEGRATED_SPACE_CELL"],
+      "notes": "完成系外探索，进入不可逆阶段"
+    }
+  ]
+}

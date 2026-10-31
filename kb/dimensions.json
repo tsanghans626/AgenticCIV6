@@ -1,0 +1,282 @@
+[
+  {
+    "dimensionId": "cities",
+    "nameZh": "城市数",
+    "nameEn": "Cities",
+    "unit": "座",
+    "valueType": "int",
+    "aggregation": "count",
+    "direction": "higher",
+    "observation": "城市列表数量"
+  },
+  {
+    "dimensionId": "population",
+    "nameZh": "总人口",
+    "nameEn": "Population",
+    "unit": "人口",
+    "valueType": "int",
+    "aggregation": "sum",
+    "direction": "higher",
+    "observation": "帝国总览人口"
+  },
+  {
+    "dimensionId": "science_per_turn",
+    "nameZh": "科研/回合",
+    "nameEn": "Science per turn",
+    "unit": "瓶/回合",
+    "valueType": "real",
+    "aggregation": "sum",
+    "direction": "higher",
+    "observation": "科技面板顶部产出"
+  },
+  {
+    "dimensionId": "culture_per_turn",
+    "nameZh": "文化/回合",
+    "nameEn": "Culture per turn",
+    "unit": "琴/回合",
+    "valueType": "real",
+    "aggregation": "sum",
+    "direction": "higher",
+    "observation": "文化面板顶部产出"
+  },
+  {
+    "dimensionId": "faith_per_turn",
+    "nameZh": "信仰/回合",
+    "nameEn": "Faith per turn",
+    "unit": "鸽/回合",
+    "valueType": "real",
+    "aggregation": "sum",
+    "direction": "higher",
+    "observation": "宗教面板信仰/回合"
+  },
+  {
+    "dimensionId": "gold_per_turn",
+    "nameZh": "金币净收入/回合",
+    "nameEn": "Gold net per turn",
+    "unit": "金/回合",
+    "valueType": "real",
+    "aggregation": "sum",
+    "direction": "higher",
+    "observation": "国库面板净收入"
+  },
+  {
+    "dimensionId": "production_per_turn",
+    "nameZh": "产能/回合",
+    "nameEn": "Production per turn",
+    "unit": "锤/回合",
+    "valueType": "real",
+    "aggregation": "sum",
+    "direction": "higher",
+    "observation": "城市生产面板合计"
+  },
+  {
+    "dimensionId": "food_per_turn",
+    "nameZh": "食物/回合",
+    "nameEn": "Food per turn",
+    "unit": "粮/回合",
+    "valueType": "real",
+    "aggregation": "sum",
+    "direction": "higher",
+    "observation": "城市食物面板"
+  },
+  {
+    "dimensionId": "tourism_per_turn",
+    "nameZh": "旅游/回合",
+    "nameEn": "Tourism per turn",
+    "unit": "旅游/回合",
+    "valueType": "real",
+    "aggregation": "sum",
+    "direction": "higher",
+    "observation": "文化胜利面板旅游/回合"
+  },
+  {
+    "dimensionId": "domestic_tourists",
+    "nameZh": "国内游客",
+    "nameEn": "Domestic tourists",
+    "unit": "人",
+    "valueType": "int",
+    "aggregation": "sum",
+    "direction": "higher",
+    "observation": "文化胜利面板国内游客"
+  },
+  {
+    "dimensionId": "international_tourists",
+    "nameZh": "国际游客",
+    "nameEn": "International tourists",
+    "unit": "人",
+    "valueType": "int",
+    "aggregation": "max",
+    "direction": "higher",
+    "observation": "文化胜利面板国际游客（对每个文明）"
+  },
+  {
+    "dimensionId": "great_person_points",
+    "nameZh": "伟人点/回合",
+    "nameEn": "Great person points",
+    "unit": "点/回合",
+    "valueType": "real",
+    "aggregation": "sum",
+    "direction": "higher",
+    "observation": "伟人面板点数/回合"
+  },
+  {
+    "dimensionId": "amenities_surplus",
+    "nameZh": "宜居富余",
+    "nameEn": "Amenities surplus",
+    "unit": "宜居",
+    "valueType": "real",
+    "aggregation": "sum",
+    "direction": "band",
+    "observation": "城市宜居度条"
+  },
+  {
+    "dimensionId": "housing_surplus",
+    "nameZh": "住房富余",
+    "nameEn": "Housing surplus",
+    "unit": "住房",
+    "valueType": "real",
+    "aggregation": "min",
+    "direction": "band",
+    "observation": "城市住房条"
+  },
+  {
+    "dimensionId": "trade_routes",
+    "nameZh": "商路数",
+    "nameEn": "Trade routes",
+    "unit": "条",
+    "valueType": "int",
+    "aggregation": "sum",
+    "direction": "higher",
+    "observation": "贸易面板容量"
+  },
+  {
+    "dimensionId": "military_strength",
+    "nameZh": "军力",
+    "nameEn": "Military strength",
+    "unit": "力",
+    "valueType": "real",
+    "aggregation": "sum",
+    "direction": "higher",
+    "observation": "军事面板总军力"
+  },
+  {
+    "dimensionId": "powered_cities",
+    "nameZh": "通电城市",
+    "nameEn": "Powered cities",
+    "unit": "座",
+    "valueType": "int",
+    "aggregation": "count",
+    "direction": "higher",
+    "observation": "电力面板"
+  },
+  {
+    "dimensionId": "diplomatic_points",
+    "nameZh": "外交点",
+    "nameEn": "Diplomatic points",
+    "unit": "点",
+    "valueType": "int",
+    "aggregation": "last",
+    "direction": "higher",
+    "observation": "世界议会外交点"
+  },
+  {
+    "dimensionId": "favor_per_turn",
+    "nameZh": "外交资本/回合",
+    "nameEn": "Diplomatic favor per turn",
+    "unit": "点/回合",
+    "valueType": "real",
+    "aggregation": "sum",
+    "direction": "higher",
+    "observation": "外交资本面板"
+  },
+  {
+    "dimensionId": "gold_stock",
+    "nameZh": "金币存量",
+    "nameEn": "Gold stock",
+    "unit": "金",
+    "valueType": "real",
+    "aggregation": "last",
+    "direction": "band",
+    "observation": "国库余额"
+  },
+  {
+    "dimensionId": "faith_stock",
+    "nameZh": "信仰存量",
+    "nameEn": "Faith stock",
+    "unit": "鸽",
+    "valueType": "real",
+    "aggregation": "last",
+    "direction": "band",
+    "observation": "宗教面板余额"
+  },
+  {
+    "dimensionId": "techs_researched",
+    "nameZh": "已研科技",
+    "nameEn": "Technologies researched",
+    "unit": "项",
+    "valueType": "int",
+    "aggregation": "count",
+    "direction": "higher",
+    "observation": "科技树"
+  },
+  {
+    "dimensionId": "civics_researched",
+    "nameZh": "已完成市政",
+    "nameEn": "Civics researched",
+    "unit": "项",
+    "valueType": "int",
+    "aggregation": "count",
+    "direction": "higher",
+    "observation": "市政树"
+  },
+  {
+    "dimensionId": "converted_civs",
+    "nameZh": "已改宗文明数",
+    "nameEn": "Converted civilizations",
+    "unit": "个",
+    "valueType": "int",
+    "aggregation": "count",
+    "direction": "higher",
+    "observation": "宗教胜利面板"
+  },
+  {
+    "dimensionId": "captured_capitals",
+    "nameZh": "已占首都",
+    "nameEn": "Captured original capitals",
+    "unit": "座",
+    "valueType": "int",
+    "aggregation": "count",
+    "direction": "higher",
+    "observation": "统治胜利进度"
+  },
+  {
+    "dimensionId": "spaceport_projects",
+    "nameZh": "航天项目完成数",
+    "nameEn": "Space projects completed",
+    "unit": "项",
+    "valueType": "int",
+    "aggregation": "count",
+    "direction": "higher",
+    "observation": "项目面板"
+  },
+  {
+    "dimensionId": "housing",
+    "nameZh": "住房",
+    "nameEn": "Housing",
+    "unit": "住房",
+    "valueType": "real",
+    "aggregation": "sum",
+    "direction": "higher",
+    "observation": "城市住房"
+  },
+  {
+    "dimensionId": "amenities",
+    "nameZh": "宜居",
+    "nameEn": "Amenities",
+    "unit": "宜居",
+    "valueType": "real",
+    "aggregation": "sum",
+    "direction": "higher",
+    "observation": "城市宜居度"
+  }
+]

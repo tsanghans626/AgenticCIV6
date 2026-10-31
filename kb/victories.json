@@ -1,0 +1,61 @@
+[
+  {
+    "victoryId": "science",
+    "nameZh": "科技胜利",
+    "nameEn": "Science Victory",
+    "rawVictoryType": "VICTORY_TECHNOLOGY",
+    "winCheck": "完成系外行星探索项目，且飞船抵达系外行星（每座激光站缩短飞行时间）",
+    "criticalPercentage": 60,
+    "burstDefinition": "关键科技闭包完成 + 宇航中心就位 + 产能足以在窗口内完成全部航天项目；此后对手无法阻止",
+    "defaultBurstTurn": 240,
+    "sourceFlag": "rule",
+    "confidence": 0.9
+  },
+  {
+    "victoryId": "culture",
+    "nameZh": "文化胜利",
+    "nameEn": "Culture Victory",
+    "rawVictoryType": "VICTORY_CULTURE",
+    "winCheck": "国际游客数超过每个其他文明的国内游客数",
+    "criticalPercentage": 75,
+    "burstDefinition": "旅游/回合持续高于所有对手国内游客的增长速度，且领先量大于对手追赶窗口",
+    "defaultBurstTurn": 250,
+    "sourceFlag": "rule",
+    "confidence": 0.9
+  },
+  {
+    "victoryId": "religion",
+    "nameZh": "宗教胜利",
+    "nameEn": "Religious Victory",
+    "rawVictoryType": "VICTORY_RELIGIOUS",
+    "winCheck": "每个其他文明都有超过 50% 的城市信仰你的宗教",
+    "criticalPercentage": 80,
+    "burstDefinition": "每个文明 >50% 城市已改宗，且使徒产出速度高于对手审判官压制速度",
+    "defaultBurstTurn": 220,
+    "sourceFlag": "rule",
+    "confidence": 0.9
+  },
+  {
+    "victoryId": "domination",
+    "nameZh": "统治胜利",
+    "nameEn": "Domination Victory",
+    "rawVictoryType": "VICTORY_CONQUEST",
+    "winCheck": "占领所有其他文明的原始首都",
+    "criticalPercentage": 50,
+    "burstDefinition": "军力足以在连续 N 回合内攻下剩余首都，且回合金不为负",
+    "defaultBurstTurn": 230,
+    "sourceFlag": "rule",
+    "confidence": 0.9
+  },
+  {
+    "victoryId": "diplomatic",
+    "nameZh": "外交胜利",
+    "nameEn": "Diplomatic Victory",
+    "rawVictoryType": "VICTORY_DIPLOMATIC",
+    "winCheck": "获得 20 个外交胜利点（世界议会决议、竞赛、城邦宗主、奇观等）",
+    "burstDefinition": "外交点达到 20，或每回合外交点/票数足以在下次议会锁定",
+    "defaultBurstTurn": 260,
+    "sourceFlag": "rule",
+    "confidence": 0.85
+  }
+]

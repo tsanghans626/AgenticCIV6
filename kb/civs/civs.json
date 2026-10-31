@@ -1,0 +1,245 @@
+[
+  {
+    "civId": "CIVILIZATION_KOREA",
+    "leaderId": "LEADER_SEONDEOK",
+    "supportedVictories": ["science"],
+    "playstyleTags": ["科技", "书院", "孤立摆放"],
+    "summary": "书院替代学院，平地相邻加成高，但每相邻区域 -1；科技线强势。",
+    "deltas": [
+      { "victoryId": "science", "op": "add", "targetRef": { "category": "metric", "dimensionId": "science_per_turn" }, "valueNum": 40, "eraId": "ERA_MEDIEVAL", "reason": "书院平地+4 相邻" },
+      { "victoryId": "science", "op": "note", "targetRef": { "category": "metric", "dimensionId": "science_per_turn" }, "valueText": "书院必须孤立摆放，避免每相邻区域 -1", "reason": "摆放约束" }
+    ]
+  },
+  {
+    "civId": "CIVILIZATION_BABYLON_STK",
+    "leaderId": "LEADER_HAMMURABI",
+    "supportedVictories": ["science", "domination"],
+    "playstyleTags": ["尤里卡", "爆发", "科技跳跃"],
+    "summary": "尤里卡直接完成科技，科技节奏非线性；适合抢关键节点。",
+    "deltas": [
+      { "victoryId": "science", "op": "multiply", "targetRef": { "category": "metric", "dimensionId": "science_per_turn" }, "valueNum": 0.7, "reason": "尤里卡=100% 进度，等效科技需求降低" },
+      { "victoryId": "science", "op": "note", "targetRef": { "category": "tech", "entityId": "TECH_ROCKETRY" }, "valueText": "优先触发尤里卡，再补瓶", "reason": "巴比伦机制" }
+    ]
+  },
+  {
+    "civId": "CIVILIZATION_MALI",
+    "leaderId": "LEADER_MANSA_MUSA",
+    "supportedVictories": ["religion", "culture"],
+    "playstyleTags": ["金币", "信仰", "沙漠"],
+    "summary": "曼丁哥市场与沙漠取金，金币/信仰强，产能偏低。",
+    "deltas": [
+      { "victoryId": "religion", "op": "add", "targetRef": { "category": "metric", "dimensionId": "faith_per_turn" }, "valueNum": 30, "reason": "沙漠/圣地信仰" },
+      { "victoryId": "religion", "op": "note", "targetRef": { "category": "metric", "dimensionId": "gold_per_turn" }, "valueText": "金币优先买工人/移民", "reason": "马里经济" }
+    ]
+  },
+  {
+    "civId": "CIVILIZATION_GERMANY",
+    "leaderId": "LEADER_BARBAROSSA",
+    "supportedVictories": ["science", "domination"],
+    "playstyleTags": ["产能", "汉萨", "城邦"],
+    "summary": "汉萨替代工业区，商业中心相邻加成高；产能线强势。",
+    "deltas": [
+      { "victoryId": "science", "op": "add", "targetRef": { "category": "metric", "dimensionId": "production_per_turn" }, "valueNum": 40, "eraId": "ERA_INDUSTRIAL", "reason": "汉萨相邻产能" },
+      { "victoryId": "domination", "op": "multiply", "targetRef": { "category": "metric", "dimensionId": "production_per_turn" }, "valueNum": 1.1, "reason": "德国产能优势" }
+    ]
+  },
+  {
+    "civId": "CIVILIZATION_JAPAN",
+    "leaderId": "LEADER_HOJO",
+    "supportedVictories": ["science", "domination"],
+    "playstyleTags": ["相邻", "区域密集", "电子厂"],
+    "summary": "区域互相相邻加成，电子厂替代工厂；密集摆放收益高。",
+    "deltas": [
+      { "victoryId": "science", "op": "add", "targetRef": { "category": "metric", "dimensionId": "science_per_turn" }, "valueNum": 25, "eraId": "ERA_MEDIEVAL", "reason": "区域相邻加成" }
+    ]
+  },
+  {
+    "civId": "CIVILIZATION_ROME",
+    "leaderId": "LEADER_TRAJAN",
+    "supportedVictories": ["science", "domination", "culture"],
+    "playstyleTags": ["铺城", "纪念碑", "军团"],
+    "summary": "新城自带纪念碑/道路，铺城与早期基建强。",
+    "deltas": [
+      { "victoryId": "science", "op": "add", "targetRef": { "category": "metric", "dimensionId": "culture_per_turn" }, "valueNum": 15, "eraId": "ERA_CLASSICAL", "reason": "免费纪念碑" },
+      { "victoryId": "domination", "op": "add", "targetRef": { "category": "metric", "dimensionId": "military_strength" }, "valueNum": 80, "reason": "军团强势期" }
+    ]
+  },
+  {
+    "civId": "CIVILIZATION_GREECE",
+    "leaderId": "LEADER_PERICLES",
+    "supportedVictories": ["culture", "diplomatic"],
+    "playstyleTags": ["文化", "城邦", "卫城"],
+    "summary": "卫城替代剧院，城邦宗主文化加成；文化/外交线强。",
+    "deltas": [
+      { "victoryId": "culture", "op": "multiply", "targetRef": { "category": "metric", "dimensionId": "culture_per_turn" }, "valueNum": 1.15, "reason": "卫城与城邦文化" },
+      { "victoryId": "diplomatic", "op": "add", "targetRef": { "category": "metric", "dimensionId": "favor_per_turn" }, "valueNum": 3, "reason": "城邦宗主" }
+    ]
+  },
+  {
+    "civId": "CIVILIZATION_CHINA",
+    "leaderId": "LEADER_QIN",
+    "supportedVictories": ["science", "culture"],
+    "playstyleTags": ["奇观", "工人", "尤里卡"],
+    "summary": "工人加速奇观，朝代更替尤里卡+10%；适合奇观/科技混合。",
+    "deltas": [
+      { "victoryId": "science", "op": "add", "targetRef": { "category": "metric", "dimensionId": "production_per_turn" }, "valueNum": 30, "eraId": "ERA_CLASSICAL", "reason": "工人加速奇观/区域" },
+      { "victoryId": "culture", "op": "add", "targetRef": { "category": "metric", "dimensionId": "culture_per_turn" }, "valueNum": 20, "eraId": "ERA_MEDIEVAL", "reason": "奇观文化" }
+    ]
+  },
+  {
+    "civId": "CIVILIZATION_AMERICA",
+    "leaderId": "LEADER_T_ROOSEVELT",
+    "supportedVictories": ["culture", "diplomatic"],
+    "playstyleTags": ["旅游", "电影城", "国家公园"],
+    "summary": "电影城/国家公园旅游强，适合文化胜利。",
+    "deltas": [
+      { "victoryId": "culture", "op": "add", "targetRef": { "category": "metric", "dimensionId": "tourism_per_turn" }, "valueNum": 30, "reason": "电影城/国家公园" }
+    ]
+  },
+  {
+    "civId": "CIVILIZATION_RUSSIA",
+    "leaderId": "LEADER_PETER_GREAT",
+    "supportedVictories": ["religion", "culture"],
+    "playstyleTags": ["信仰", "冻土", "拉夫拉"],
+    "summary": "冻土信仰与拉夫拉，宗教/文化线强。",
+    "deltas": [
+      { "victoryId": "religion", "op": "add", "targetRef": { "category": "metric", "dimensionId": "faith_per_turn" }, "valueNum": 40, "reason": "冻土/拉夫拉" },
+      { "victoryId": "culture", "op": "add", "targetRef": { "category": "metric", "dimensionId": "culture_per_turn" }, "valueNum": 20, "reason": "伟人作品" }
+    ]
+  },
+  {
+    "civId": "CIVILIZATION_EGYPT",
+    "leaderId": "LEADER_CLEOPATRA",
+    "supportedVictories": ["culture", "religion"],
+    "playstyleTags": ["奇观", "贸易", "信仰"],
+    "summary": "奇观加速与商路金币，适合奇观/文化线。",
+    "deltas": [
+      { "victoryId": "culture", "op": "add", "targetRef": { "category": "metric", "dimensionId": "culture_per_turn" }, "valueNum": 15, "eraId": "ERA_CLASSICAL", "reason": "奇观文化" },
+      { "victoryId": "religion", "op": "add", "targetRef": { "category": "metric", "dimensionId": "gold_per_turn" }, "valueNum": 20, "reason": "商路金币" }
+    ]
+  },
+  {
+    "civId": "CIVILIZATION_ARABIA",
+    "leaderId": "LEADER_SALADIN",
+    "supportedVictories": ["religion", "science"],
+    "playstyleTags": ["宗教", "科学", "清真寺"],
+    "summary": "清真寺与宗教传播，信仰/科技兼顾。",
+    "deltas": [
+      { "victoryId": "religion", "op": "add", "targetRef": { "category": "metric", "dimensionId": "faith_per_turn" }, "valueNum": 30, "reason": "清真寺/宗教传播" },
+      { "victoryId": "science", "op": "add", "targetRef": { "category": "metric", "dimensionId": "science_per_turn" }, "valueNum": 20, "reason": "宗教建筑科技" }
+    ]
+  },
+  {
+    "civId": "CIVILIZATION_ENGLAND",
+    "leaderId": "LEADER_VICTORIA",
+    "supportedVictories": ["domination", "diplomatic"],
+    "playstyleTags": ["海军", "商路", "殖民地"],
+    "summary": "海军与商路/殖民地经济，适合统治/外交。",
+    "deltas": [
+      { "victoryId": "domination", "op": "add", "targetRef": { "category": "metric", "dimensionId": "gold_per_turn" }, "valueNum": 25, "reason": "商路/殖民地金币" },
+      { "victoryId": "diplomatic", "op": "add", "targetRef": { "category": "metric", "dimensionId": "favor_per_turn" }, "valueNum": 2, "reason": "城邦/贸易" }
+    ]
+  },
+  {
+    "civId": "CIVILIZATION_FRANCE",
+    "leaderId": "LEADER_CATHERINE_DE_MEDICI",
+    "supportedVictories": ["culture", "domination"],
+    "playstyleTags": ["文化", "间谍", "奇观"],
+    "summary": "奇观/文化/间谍，文化线强势。",
+    "deltas": [
+      { "victoryId": "culture", "op": "multiply", "targetRef": { "category": "metric", "dimensionId": "culture_per_turn" }, "valueNum": 1.12, "reason": "奇观与文化" }
+    ]
+  },
+  {
+    "civId": "CIVILIZATION_INDIA",
+    "leaderId": "LEADER_GANDHI",
+    "supportedVictories": ["religion", "culture"],
+    "playstyleTags": ["宗教", "信仰", "非暴力"],
+    "summary": "信仰与宗教传播，适合宗教线。",
+    "deltas": [
+      { "victoryId": "religion", "op": "add", "targetRef": { "category": "metric", "dimensionId": "faith_per_turn" }, "valueNum": 25, "reason": "信仰/宗教" }
+    ]
+  },
+  {
+    "civId": "CIVILIZATION_NUBIA",
+    "leaderId": "LEADER_AMANITORE",
+    "supportedVictories": ["domination", "science"],
+    "playstyleTags": ["远程", "产能", "金字塔"],
+    "summary": "远程单位与产能优势，早期统治线强。",
+    "deltas": [
+      { "victoryId": "domination", "op": "add", "targetRef": { "category": "metric", "dimensionId": "production_per_turn" }, "valueNum": 30, "eraId": "ERA_CLASSICAL", "reason": "努比亚产能/远程" }
+    ]
+  },
+  {
+    "civId": "CIVILIZATION_PERSIA",
+    "leaderId": "LEADER_CYRUS",
+    "supportedVictories": ["domination", "culture"],
+    "playstyleTags": ["突袭", "文化", "商路"],
+    "summary": "突袭与商路/文化，统治线强势。",
+    "deltas": [
+      { "victoryId": "domination", "op": "add", "targetRef": { "category": "metric", "dimensionId": "military_strength" }, "valueNum": 100, "reason": "波斯突袭" }
+    ]
+  },
+  {
+    "civId": "CIVILIZATION_AZTEC",
+    "leaderId": "LEADER_MONTEZUMA",
+    "supportedVictories": ["domination", "science"],
+    "playstyleTags": ["鹰武士", "工人", "区域"],
+    "summary": "鹰武士与工人加速区域，早期统治强。",
+    "deltas": [
+      { "victoryId": "domination", "op": "add", "targetRef": { "category": "metric", "dimensionId": "production_per_turn" }, "valueNum": 25, "eraId": "ERA_CLASSICAL", "reason": "工人加速区域" }
+    ]
+  },
+  {
+    "civId": "CIVILIZATION_BYZANTIUM",
+    "leaderId": "LEADER_BASIL",
+    "supportedVictories": ["domination"],
+    "playstyleTags": ["宗教", "重骑兵", "timing"],
+    "summary": "宗教改宗 + 重骑兵 timing：同宗教城骑兵打满伤害，甲胄骑兵由市政解锁。",
+    "deltas": [],
+    "capabilities": [
+      {
+        "op": "waive",
+        "traitId": "TRAIT_LEADER_BASIL",
+        "targetRef": { "kind": "unit", "id": "UNIT_TREBUCHET" },
+        "remove": ["UNIT_TREBUCHET"],
+        "requires": { "stateReligion": true, "targetCityReligion": "same" },
+        "effectTextZh": "对所信仰 宗教与您主流宗教相同的城市发起进攻时，轻重骑兵将造成全额伤害。",
+        "why": "生于紫室：目标城同宗教时骑兵打满伤害，攻城单位不是硬门（改宗失败时才需要）",
+        "confidence": 0.7
+      },
+      {
+        "op": "retarget",
+        "traitId": "TRAIT_LEADER_UNIT_BYZANTINE_TAGMA",
+        "targetRef": { "kind": "unit", "id": "UNIT_BYZANTINE_TAGMA" },
+        "add": [],
+        "remove": ["TECH_STIRRUPS"],
+        "requires": { "civic": "CIVIC_DIVINE_RIGHT" },
+        "effectTextZh": "巴兹尔二世中世纪特色重骑兵单位，替代骑士。\n\n使1单元格范围内的所有单位获得+2 战斗力或 宗教战斗力。",
+        "why": "甲胄骑兵前置是市政「王权神授」，马镫科技只服务普通骑士，属死路",
+        "confidence": 0.7
+      },
+      {
+        "op": "convert",
+        "traitId": "TRAIT_CIVILIZATION_BYZANTIUM",
+        "targetRef": { "kind": "constraint", "id": "combat_strength" },
+        "value": 2,
+        "requires": { "stateReligion": true },
+        "effectTextZh": "每有1座圣城皈依拜占庭的 宗教（包括拜占庭自己的圣城），单位获得+2 战斗力或+3 宗教战斗力。\n\n击杀敌方文明或城邦的单位时，将会向附近的城市传播您的 宗教。\n\n圣地提供+1 大预言家点数。",
+        "why": "信仰不是产出目标，而是「战力/改宗」的前置：宗教存在才触发 +2 与击杀传播",
+        "confidence": 0.7
+      },
+      {
+        "op": "precondition",
+        "traitId": "TRAIT_CIVILIZATION_DISTRICT_HIPPODROME",
+        "targetRef": { "kind": "district", "id": "DISTRICT_HIPPODROME" },
+        "add": ["DISTRICT_HIPPODROME"],
+        "remove": [],
+        "requires": { "civic": "CIVIC_GAMES_RECREATION", "cost": 30 },
+        "effectTextZh": "拜占庭特色区域，替代娱乐中心。\n\n建成此区域中的建筑后，立刻获得当前已解锁的最强重骑兵单位。",
+        "why": "30 锤区域 +3 宜居；建成建筑还送当前最强重骑兵（竞技场 150 留到王权神授后再建）",
+        "confidence": 0.6
+      }
+    ]
+  }
+]

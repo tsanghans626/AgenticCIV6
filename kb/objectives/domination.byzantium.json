@@ -1,0 +1,316 @@
+[
+  {
+    "objectiveId": "domination:CIVILIZATION_BYZANTIUM:LEADER_BASIL",
+    "victoryId": "domination",
+    "civId": "CIVILIZATION_BYZANTIUM",
+    "leaderId": "LEADER_BASIL",
+    "speed": "standard",
+    "burstTurn": 130,
+    "burstEra": "ERA_MEDIEVAL",
+    "title": "拜占庭 · 巴兹尔二世：改宗 + 甲胄骑兵 timing（算账版）",
+    "gates": [
+      { "kind": "unit", "id": "UNIT_HEAVY_CHARIOT", "qty": 8, "role": "blocking", "rationale": "升级池：重战车 → 甲胄骑兵" },
+      { "kind": "node", "id": "UNIT_BYZANTINE_TAGMA", "role": "blocking", "rationale": "甲胄骑兵：前置是市政而非马镫" },
+      { "kind": "node", "id": "CIVIC_DIVINE_RIGHT", "role": "blocking", "rationale": "解锁甲胄骑兵 + 骑士精神" },
+      { "kind": "node", "id": "DISTRICT_HIPPODROME", "role": "enabling", "rationale": "跑马场 +3 宜居" },
+      { "kind": "node", "id": "BUILDING_SHRINE", "role": "blocking", "rationale": "圣地的先知点/信仰前置" },
+      { "kind": "node", "id": "BUILDING_TEMPLE", "role": "enabling", "rationale": "买使徒是可选路线；击杀改宗可替代" },
+      { "kind": "node", "id": "TECH_BRONZE_WORKING", "role": "blocking", "rationale": "露铁：重战车需要铁" },
+      { "kind": "unit", "id": "UNIT_TREBUCHET", "qty": 2, "role": "enabling", "rationale": "仅在目标城无法改宗时需要" },
+      { "kind": "metric", "metric": "captured_capitals", "op": ">=", "value": 7, "role": "blocking" }
+    ],
+    "supply": [
+      {
+        "sourceId": "palace",
+        "metric": "culture_per_turn",
+        "kind": "building",
+        "refId": "BUILDING_PALACE",
+        "perUnit": 1,
+        "copies": 1,
+        "fromTurn": 1,
+        "dataRef": "kb_effect:building:BUILDING_PALACE:culture_per_turn",
+        "sourceFlag": "db",
+        "confidence": 0.8,
+        "note": "宫殿自带 +1 琴"
+      },
+      {
+        "sourceId": "monuments",
+        "metric": "culture_per_turn",
+        "kind": "building",
+        "refId": "BUILDING_MONUMENT",
+        "perUnit": 1,
+        "copies": 3,
+        "copiesLo": 1,
+        "copiesHi": 4,
+        "fromTurn": 30,
+        "dataRef": "kb_effect:building:BUILDING_MONUMENT:culture_per_turn",
+        "sourceFlag": "db",
+        "confidence": 0.7,
+        "note": "每城纪念碑 +1 琴（60 锤）"
+      },
+      {
+        "sourceId": "culture-resources",
+        "metric": "culture_per_turn",
+        "kind": "resource",
+        "refId": "RESOURCE_COFFEE",
+        "perUnit": 1,
+        "copies": 2,
+        "copiesLo": 0,
+        "copiesHi": 3,
+        "fromTurn": 35,
+        "dataRef": "kb_effect:resource:RESOURCE_COFFEE|JADE|MARBLE|SILK|AMBER:culture_per_turn",
+        "sourceFlag": "db",
+        "confidence": 0.6,
+        "note": "咖啡/玉石/大理石/丝绸/琥珀各 +1 琴；按地块随机，base 假设 2 个"
+      },
+      {
+        "sourceId": "connoisseur",
+        "metric": "culture_per_turn",
+        "kind": "governor",
+        "refId": "GOVERNOR_PROMOTION_EDUCATOR_CONNOISSEUR",
+        "perUnit": 1,
+        "copies": 6,
+        "copiesLo": 0,
+        "copiesHi": 9,
+        "perPop": true,
+        "fromTurn": 40,
+        "dataRef": "GovernorPromotionModifiers:CONNOISSEUR_CULTURE_CITIZEN",
+        "sourceFlag": "rule",
+        "confidence": 0.6,
+        "note": "文化总督晋升·鉴赏家：每位公民 +1 琴；copies = 该城人口（晋升归属由 GovernorPromotionSets 解析，不要手写总督名）"
+      },
+      {
+        "sourceId": "choral-shrines",
+        "metric": "culture_per_turn",
+        "kind": "building",
+        "refId": "BUILDING_SHRINE",
+        "perUnit": 2,
+        "copies": 3,
+        "copiesLo": 1,
+        "copiesHi": 4,
+        "fromTurn": 75,
+        "dataRef": "BeliefModifiers:BELIEF_CHORAL_MUSIC:CHORAL_MUSIC_SHRINE_CULTURE",
+        "sourceFlag": "rule",
+        "confidence": 0.6,
+        "note": "合唱圣歌：神社 +2 琴"
+      },
+      {
+        "sourceId": "choral-temples",
+        "metric": "culture_per_turn",
+        "kind": "building",
+        "refId": "BUILDING_TEMPLE",
+        "perUnit": 4,
+        "copies": 2,
+        "copiesLo": 1,
+        "copiesHi": 3,
+        "fromTurn": 100,
+        "dataRef": "BeliefModifiers:BELIEF_CHORAL_MUSIC:CHORAL_TEMPLE_CULTURE",
+        "sourceFlag": "rule",
+        "confidence": 0.6,
+        "note": "合唱圣歌：寺庙 +4 琴"
+      },
+      {
+        "sourceId": "amphitheaters",
+        "metric": "culture_per_turn",
+        "kind": "building",
+        "refId": "BUILDING_AMPHITHEATER",
+        "perUnit": 3,
+        "copies": 1,
+        "copiesLo": 0,
+        "copiesHi": 2,
+        "fromTurn": 90,
+        "dataRef": "kb_effect:building:BUILDING_AMPHITHEATER:culture_per_turn",
+        "sourceFlag": "db",
+        "confidence": 0.6,
+        "note": "古罗马剧场 +3 琴（需剧院广场 + 戏剧和诗歌）"
+      }
+    ],
+    "scenarios": [
+      {
+        "id": "base",
+        "label": "1–2 文化资源、3 纪念碑、鉴赏家城 6 人口、合唱圣歌到位",
+        "costMultiplier": 1,
+        "creditInspirations": false
+      },
+      {
+        "id": "low",
+        "label": "0 文化资源 + 早战：1 纪念碑、鉴赏家未到、只 1 神社",
+        "supplyOverrides": {
+          "monuments": 1,
+          "culture-resources": 0,
+          "connoisseur": 0,
+          "choral-shrines": 1,
+          "choral-temples": 1,
+          "amphitheaters": 0
+        },
+        "note": "被邻居早战时文化供给塌陷，波次必须顺延"
+      },
+      {
+        "id": "high",
+        "label": "3+ 文化资源、4 纪念碑、鉴赏家城 9 人口",
+        "supplyOverrides": {
+          "monuments": 4,
+          "culture-resources": 3,
+          "connoisseur": 9,
+          "choral-shrines": 4,
+          "choral-temples": 3,
+          "amphitheaters": 2
+        }
+      }
+    ],
+    "inspiration": { "mode": "none" },
+    "cutOrder": [
+      {
+        "kind": "defer",
+        "refId": "CIVIC_MYSTICISM",
+        "saves": { "culture": 50 },
+        "lose": "神秘主义延后：先知点与圣地祷告顺延",
+        "order": 1,
+        "trigger": "古代缺口 > 0"
+      },
+      {
+        "kind": "defer",
+        "refId": "CIVIC_CRAFTSMANSHIP",
+        "saves": { "culture": 40 },
+        "lose": "技艺延后：建造者/改良节奏顺延",
+        "order": 2
+      },
+      {
+        "kind": "defer",
+        "refId": "CIVIC_DRAMA_POETRY",
+        "saves": { "culture": 110 },
+        "lose": "戏剧和诗歌延后：古罗马剧场 +3 琴/城延后",
+        "order": 3
+      },
+      {
+        "kind": "defer",
+        "refId": "CIVIC_THEOLOGY",
+        "saves": { "culture": 120 },
+        "lose": "神学延后：寺庙购买使徒延后",
+        "order": 4
+      },
+      {
+        "kind": "defer",
+        "refId": "CIVIC_RECORDED_HISTORY",
+        "saves": { "culture": 175 },
+        "lose": "历史记录延后：行政部门链顺延",
+        "order": 5
+      },
+      {
+        "kind": "drop",
+        "group": "upgrade-discount",
+        "saves": { "culture": 810 },
+        "lose": "职业军队 -40% 升级金币；国库够就直接升级",
+        "order": 9,
+        "trigger": "国库 ≥ 单次升级成本 × 数量"
+      }
+    ],
+    "constraints": [
+      { "metric": "science_per_turn", "supplyRate": 8, "notes": "学院/图书馆；经验锚点", "sourceFlag": "empirical" },
+      { "metric": "production_per_turn", "supplyRate": 40, "notes": "每城约 35-40 锤经验锚点", "sourceFlag": "empirical" },
+      { "metric": "great_person_points", "required": 30, "supplyRate": 4, "unit": "点", "notes": "圣地 2 点/回合 + 神社", "sourceFlag": "derived" },
+      { "metric": "faith_per_turn", "supplyRate": 6, "unit": "鸽", "notes": "神社/寺庙；用于使徒/传教士", "sourceFlag": "empirical" }
+    ],
+    "deadEnds": [
+      { "kind": "tech", "id": "TECH_STIRRUPS", "why": "甲胄骑兵前置是市政「王权神授」，马镫只服务普通骑士" },
+      { "kind": "tech", "id": "TECH_CASTLES", "why": "不服务本波次；重骑升级链直接到坦克" }
+    ],
+    "detours": [
+      { "groupId": "upgrade-discount", "ids": ["CIVIC_MERCENARIES"], "why": "职业军队 -40% 升级金币 + 贴身随从 -50% 资源，但要多点军事传统/军事训练/封建主义", "alternative": "金币充足就跳过整组" }
+    ],
+    "eraFocusOverrides": [
+      {
+        "eraId": "ERA_ANCIENT",
+        "rank": 1,
+        "constraintKey": "culture_per_turn",
+        "actionKind": "node",
+        "refId": "CIVIC_FOREIGN_TRADE",
+        "why": "文化是主瓶颈：先跑市政链，同时把纪念碑铺到每城；二城选址优先文化资源格",
+        "alternative": "被早战时先补投石兵/勇士，市政链顺延",
+        "abandonIf": "古代缺口 > 0 且纪念碑/鉴赏家晋升无法按时到位时，按 cut 顺延波次",
+        "checkpoint": "culture_per_turn ≥ 缺口对应需求"
+      },
+      {
+        "eraId": "ERA_ANCIENT",
+        "rank": 2,
+        "constraintKey": "culture_per_turn",
+        "actionKind": "node",
+        "refId": "CIVIC_STATE_WORKFORCE",
+        "why": "圣地落地拿先知点；圣地不追相邻，优先高产出格",
+        "alternative": "先知点落后就投圣地祷告项目",
+        "checkpoint": "圣地已落地且先知点不落后"
+      },
+      {
+        "eraId": "ERA_ANCIENT",
+        "rank": 3,
+        "constraintKey": "production_per_turn",
+        "actionKind": "node",
+        "refId": "TECH_BRONZE_WORKING",
+        "why": "露铁：没有铁就没有重战车，整条升级链断掉",
+        "checkpoint": "铁已接入"
+      },
+      {
+        "eraId": "ERA_CLASSICAL",
+        "rank": 1,
+        "constraintKey": "culture_per_turn",
+        "actionKind": "node",
+        "refId": "CIVIC_POLITICAL_PHILOSOPHY",
+        "why": "寡头军事槽 + 政体解锁；与防御战术一起构成中世纪前置",
+        "alternative": "缺口大时先补供给（合唱圣歌/总督晋升），而不是继续硬推节点",
+        "checkpoint": "政体已切换"
+      },
+      {
+        "eraId": "ERA_CLASSICAL",
+        "rank": 2,
+        "constraintKey": "culture_per_turn",
+        "actionKind": "node",
+        "refId": "CIVIC_GAMES_RECREATION",
+        "why": "跑马场 +3 宜居，战争疲劳可控；同时是防御战术前置",
+        "checkpoint": "2-3 座跑马场，宜居不为负"
+      },
+      {
+        "eraId": "ERA_CLASSICAL",
+        "rank": 3,
+        "constraintKey": "production_per_turn",
+        "actionKind": "node",
+        "refId": "TECH_THE_WHEEL",
+        "why": "重战车升级池：保留晋升与经验",
+        "checkpoint": "≥6 台重战车"
+      },
+      {
+        "eraId": "ERA_MEDIEVAL",
+        "rank": 1,
+        "constraintKey": "culture_per_turn",
+        "actionKind": "node",
+        "refId": "CIVIC_CIVIL_SERVICE",
+        "why": "行政部门是王权神授的前置，必须早排；不要被支线分走文化",
+        "checkpoint": "前置链已完成（防御战术 + 历史记录）"
+      },
+      {
+        "eraId": "ERA_MEDIEVAL",
+        "rank": 2,
+        "constraintKey": "culture_per_turn",
+        "actionKind": "node",
+        "refId": "CIVIC_DIVINE_RIGHT",
+        "why": "决胜点：甲胄骑兵 + 骑士精神 + 天主教君主政体",
+        "checkpoint": "王权神授落地"
+      },
+      {
+        "eraId": "ERA_MEDIEVAL",
+        "rank": 3,
+        "constraintKey": "production_per_turn",
+        "actionKind": "node",
+        "refId": "UNIT_HEAVY_CHARIOT",
+        "why": "升级池到位后一次性升级；金币不足才绕雇佣兵",
+        "abandonIf": "国库足够支付 6-8 次升级时整组雇佣兵跳过",
+        "checkpoint": "金币存量 ≥ 单次升级成本 × 数量"
+      }
+    ],
+    "assumptions": {
+      "speed": "standard",
+      "difficulty": "deity",
+      "opponents": 7,
+      "note": "burstTurn 130（联机 65）是文化可闭合的波次；早期灵感数据（Boosts）缺失，按 0% 抵扣保守处理。"
+    }
+  }
+]

@@ -1,0 +1,194 @@
+{
+  "victoryId": "domination",
+  "nameZh": "统治胜利",
+  "burst": {
+    "turn": 235,
+    "eraId": "ERA_MODERN",
+    "window": 20,
+    "margin": 0.1,
+    "rationale": "军力足以连续攻下剩余首都；用攻城单位+主力部队推进，回合金不为负。",
+    "techs": [
+      { "id": "TECH_RIFLING", "role": "blocking" },
+      { "id": "TECH_STEAM_POWER", "role": "enabling" },
+      { "id": "TECH_ECONOMICS", "role": "enabling" }
+    ],
+    "civics": [
+      { "id": "CIVIC_NATIONALISM", "role": "enabling" },
+      { "id": "CIVIC_IDEOLOGY", "role": "enabling" },
+      { "id": "CIVIC_URBANIZATION", "role": "enabling" }
+    ],
+    "policies": [
+      { "id": "POLICY_LEVEE_EN_MASSE", "role": "enabling" },
+      { "id": "POLICY_MILITARY_RESEARCH", "role": "enabling" }
+    ],
+    "governments": [
+      { "id": "GOVERNMENT_FASCISM", "role": "enabling", "rationale": "单位 +5 力、厌战低" }
+    ],
+    "districts": [
+      { "id": "DISTRICT_ENCAMPMENT", "qty": 4, "role": "enabling", "rationale": "将军点与军事建筑" }
+    ],
+    "buildings": [
+      { "id": "BUILDING_BARRACKS", "qty": 4, "role": "enabling" },
+      { "id": "BUILDING_ARMORY", "qty": 4, "role": "enabling" },
+      { "id": "BUILDING_MILITARY_ACADEMY", "qty": 2, "role": "enabling" }
+    ],
+    "units": [
+      { "id": "UNIT_INFANTRY", "qty": 12, "role": "blocking" },
+      { "id": "UNIT_ARTILLERY", "qty": 6, "role": "blocking", "rationale": "攻城主力" },
+      { "id": "UNIT_TANK", "qty": 6, "role": "enabling" }
+    ],
+    "metrics": [
+      { "dimension": "military_strength", "op": ">=", "value": 800, "role": "blocking", "sourceFlag": "empirical", "confidence": 0.45 },
+      { "dimension": "captured_capitals", "op": ">=", "value": 7, "role": "blocking", "sourceFlag": "rule", "confidence": 0.6 },
+      { "dimension": "gold_per_turn", "op": ">=", "value": 0, "role": "support", "sourceFlag": "derived", "confidence": 0.5 },
+      { "dimension": "production_per_turn", "op": ">=", "value": 450, "role": "enabling", "sourceFlag": "empirical", "confidence": 0.45 }
+    ],
+    "infrastructure": {
+      "cities": 12,
+      "popPerCity": 7,
+      "perCity": {
+        "BUILDING_BARRACKS": 1,
+        "BUILDING_ARMORY": 1,
+        "BUILDING_GRANARY": 1,
+        "BUILDING_MONUMENT": 1,
+        "BUILDING_MARKET": 1,
+        "BUILDING_BANK": 1,
+        "BUILDING_STOCK_EXCHANGE": 1
+      },
+      "empire": {
+        "DISTRICT_ENCAMPMENT": 4,
+        "DISTRICT_COMMERCIAL_HUB": 10,
+        "DISTRICT_INDUSTRIAL_ZONE": 4,
+        "BUILDING_MILITARY_ACADEMY": 2
+      },
+      "units": {
+        "UNIT_INFANTRY": 12,
+        "UNIT_ARTILLERY": 6,
+        "UNIT_TANK": 6
+      },
+      "perCityProd": 35,
+      "tradeRoutes": 8,
+      "goldPerRoute": 3,
+      "luxuries": 8,
+      "entertainmentAmenities": 6,
+      "housingPerCity": 9
+    }
+  },
+  "eras": [
+    {
+      "eraId": "ERA_ANCIENT",
+      "turnLo": 1,
+      "turnHi": 50,
+      "cities": { "lo": 3, "hi": 4 },
+      "population": { "lo": 15, "hi": 25 },
+      "science": { "lo": 8, "hi": 14 },
+      "culture": { "lo": 5, "hi": 10 },
+      "production": { "lo": 30, "hi": 50 },
+      "goldNet": { "lo": -5, "hi": 15 },
+      "techs": ["TECH_MINING", "TECH_BRONZE_WORKING"],
+      "civics": ["CIVIC_CODE_OF_LAWS", "CIVIC_CRAFTSMANSHIP"],
+      "buildings": ["BUILDING_BARRACKS"],
+      "districts": ["DISTRICT_ENCAMPMENT"],
+      "notes": "3 勇士 2 投石兵 1 侦察兵"
+    },
+    {
+      "eraId": "ERA_CLASSICAL",
+      "turnLo": 45,
+      "turnHi": 95,
+      "cities": { "lo": 5, "hi": 8 },
+      "population": { "lo": 25, "hi": 45 },
+      "science": { "lo": 30, "hi": 60 },
+      "culture": { "lo": 25, "hi": 50 },
+      "production": { "lo": 70, "hi": 130 },
+      "goldNet": { "lo": 0, "hi": 20 },
+      "techs": ["TECH_IRON_WORKING"],
+      "civics": ["CIVIC_POLITICAL_PHILOSOPHY"],
+      "units": ["UNIT_SWORDSMAN", "UNIT_ARCHER"],
+      "notes": "4-6 剑客/骑手 + 攻城"
+    },
+    {
+      "eraId": "ERA_MEDIEVAL",
+      "turnLo": 90,
+      "turnHi": 140,
+      "cities": { "lo": 7, "hi": 10 },
+      "population": { "lo": 40, "hi": 65 },
+      "science": { "lo": 60, "hi": 120 },
+      "culture": { "lo": 50, "hi": 100 },
+      "production": { "lo": 120, "hi": 210 },
+      "goldNet": { "lo": 10, "hi": 35 },
+      "techs": ["TECH_APPRENTICESHIP"],
+      "civics": ["CIVIC_FEUDALISM"],
+      "units": ["UNIT_MAN_AT_ARMS", "UNIT_CROSSBOWMAN"],
+      "notes": "披甲/弩手 + 城墙"
+    },
+    {
+      "eraId": "ERA_RENAISSANCE",
+      "turnLo": 135,
+      "turnHi": 185,
+      "cities": { "lo": 8, "hi": 11 },
+      "population": { "lo": 50, "hi": 80 },
+      "science": { "lo": 100, "hi": 180 },
+      "culture": { "lo": 90, "hi": 160 },
+      "production": { "lo": 180, "hi": 300 },
+      "goldNet": { "lo": 20, "hi": 50 },
+      "techs": ["TECH_RIFLING"],
+      "civics": ["CIVIC_NATIONALISM"],
+      "units": ["UNIT_MUSKETMAN", "UNIT_FIELD_CANNON"],
+      "notes": "火枪/射石炮窗口"
+    },
+    {
+      "eraId": "ERA_INDUSTRIAL",
+      "turnLo": 180,
+      "turnHi": 215,
+      "cities": { "lo": 10, "hi": 13 },
+      "population": { "lo": 60, "hi": 95 },
+      "science": { "lo": 180, "hi": 300 },
+      "culture": { "lo": 160, "hi": 280 },
+      "production": { "lo": 250, "hi": 420 },
+      "goldNet": { "lo": 30, "hi": 70 },
+      "techs": ["TECH_STEAM_POWER", "TECH_ECONOMICS"],
+      "civics": ["CIVIC_URBANIZATION"],
+      "units": ["UNIT_LINE_INFANTRY", "UNIT_ARTILLERY"],
+      "notes": "线列/大炮推进"
+    },
+    {
+      "eraId": "ERA_MODERN",
+      "turnLo": 210,
+      "turnHi": 240,
+      "cities": { "lo": 11, "hi": 14 },
+      "population": { "lo": 65, "hi": 100 },
+      "science": { "lo": 250, "hi": 420 },
+      "culture": { "lo": 220, "hi": 360 },
+      "production": { "lo": 300, "hi": 500 },
+      "goldNet": { "lo": 40, "hi": 90 },
+      "civics": ["CIVIC_IDEOLOGY"],
+      "units": ["UNIT_INFANTRY", "UNIT_TANK"],
+      "notes": "现代部队成型，开始收首都"
+    },
+    {
+      "eraId": "ERA_ATOMIC",
+      "turnLo": 235,
+      "turnHi": 255,
+      "cities": { "lo": 12, "hi": 15 },
+      "population": { "lo": 70, "hi": 110 },
+      "science": { "lo": 350, "hi": 550 },
+      "culture": { "lo": 300, "hi": 480 },
+      "production": { "lo": 350, "hi": 550 },
+      "goldNet": { "lo": 50, "hi": 100 },
+      "units": ["UNIT_MODERN_ARMOR", "UNIT_ARTILLERY"],
+      "notes": "机甲/现代装甲收尾"
+    },
+    {
+      "eraId": "ERA_INFORMATION",
+      "turnLo": 250,
+      "turnHi": 280,
+      "cities": { "lo": 12, "hi": 15 },
+      "population": { "lo": 70, "hi": 110 },
+      "science": { "lo": 450, "hi": 700 },
+      "culture": { "lo": 400, "hi": 600 },
+      "production": { "lo": 400, "hi": 650 },
+      "goldNet": { "lo": 60, "hi": 120 },
+      "notes": "统治胜利通常已在此前完成"
+    }
+  ]
+}

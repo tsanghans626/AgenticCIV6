@@ -1,0 +1,167 @@
+{
+  "victoryId": "diplomatic",
+  "nameZh": "外交胜利",
+  "burst": {
+    "turn": 265,
+    "eraId": "ERA_INFORMATION",
+    "window": 20,
+    "margin": 0.1,
+    "rationale": "外交点达到 20；靠城邦宗主、议会决议、竞赛与奇观锁定。",
+    "techs": [
+      { "id": "TECH_COMPUTERS", "role": "enabling" }
+    ],
+    "civics": [
+      { "id": "CIVIC_POLITICAL_PHILOSOPHY", "role": "enabling" },
+      { "id": "CIVIC_DIPLOMATIC_SERVICE", "role": "enabling" },
+      { "id": "CIVIC_GLOBALIZATION", "role": "enabling" }
+    ],
+    "policies": [
+      { "id": "POLICY_DIPLOMATIC_LEAGUE", "role": "enabling" },
+      { "id": "POLICY_CHARISMATIC_LEADER", "role": "enabling" },
+      { "id": "POLICY_FUTURE_VICTORY_DIPLOMATIC", "role": "enabling" }
+    ],
+    "governments": [
+      { "id": "GOVERNMENT_DEMOCRACY", "role": "enabling" }
+    ],
+    "districts": [
+      { "id": "DISTRICT_DIPLOMATIC_QUARTER", "qty": 1, "role": "enabling", "rationale": "使者/间谍容量" }
+    ],
+    "buildings": [
+      { "id": "BUILDING_CHANCERY", "qty": 1, "role": "enabling" }
+    ],
+    "metrics": [
+      { "dimension": "diplomatic_points", "op": ">=", "value": 20, "role": "blocking", "sourceFlag": "rule", "confidence": 0.7, "rationale": "外交胜利阈值" },
+      { "dimension": "favor_per_turn", "op": ">=", "value": 10, "role": "enabling", "sourceFlag": "empirical", "confidence": 0.4 },
+      { "dimension": "gold_per_turn", "op": ">=", "value": 100, "role": "support", "sourceFlag": "empirical", "confidence": 0.4 },
+      { "dimension": "cities", "op": ">=", "value": 10, "role": "enabling", "sourceFlag": "empirical", "confidence": 0.5 }
+    ],
+    "infrastructure": {
+      "cities": 10,
+      "popPerCity": 8,
+      "perCity": {
+        "BUILDING_MONUMENT": 1,
+        "BUILDING_GRANARY": 1,
+        "BUILDING_MARKET": 1,
+        "BUILDING_BANK": 1
+      },
+      "empire": {
+        "DISTRICT_DIPLOMATIC_QUARTER": 1,
+        "BUILDING_CHANCERY": 1,
+        "DISTRICT_COMMERCIAL_HUB": 10
+      },
+      "perCityProd": 30,
+      "tradeRoutes": 10,
+      "goldPerRoute": 4,
+      "luxuries": 8,
+      "entertainmentAmenities": 6,
+      "housingPerCity": 9
+    }
+  },
+  "eras": [
+    {
+      "eraId": "ERA_ANCIENT",
+      "turnLo": 1,
+      "turnHi": 50,
+      "cities": { "lo": 3, "hi": 4 },
+      "population": { "lo": 15, "hi": 25 },
+      "science": { "lo": 8, "hi": 14 },
+      "culture": { "lo": 5, "hi": 10 },
+      "production": { "lo": 30, "hi": 50 },
+      "goldNet": { "lo": 0, "hi": 20 },
+      "techs": ["TECH_POTTERY", "TECH_WRITING"],
+      "civics": ["CIVIC_CODE_OF_LAWS", "CIVIC_FOREIGN_TRADE"],
+      "notes": "先见城邦/抢首发使者"
+    },
+    {
+      "eraId": "ERA_CLASSICAL",
+      "turnLo": 45,
+      "turnHi": 95,
+      "cities": { "lo": 5, "hi": 8 },
+      "population": { "lo": 25, "hi": 45 },
+      "science": { "lo": 30, "hi": 60 },
+      "culture": { "lo": 30, "hi": 60 },
+      "production": { "lo": 70, "hi": 130 },
+      "goldNet": { "lo": 10, "hi": 30 },
+      "civics": ["CIVIC_POLITICAL_PHILOSOPHY"],
+      "notes": "政体与首批宗主"
+    },
+    {
+      "eraId": "ERA_MEDIEVAL",
+      "turnLo": 90,
+      "turnHi": 140,
+      "cities": { "lo": 7, "hi": 10 },
+      "population": { "lo": 40, "hi": 65 },
+      "science": { "lo": 60, "hi": 120 },
+      "culture": { "lo": 60, "hi": 120 },
+      "production": { "lo": 120, "hi": 210 },
+      "goldNet": { "lo": 20, "hi": 50 },
+      "civics": ["CIVIC_DIPLOMATIC_SERVICE"],
+      "buildings": ["BUILDING_CHANCERY"],
+      "notes": "外交区/使者容量"
+    },
+    {
+      "eraId": "ERA_RENAISSANCE",
+      "turnLo": 135,
+      "turnHi": 185,
+      "cities": { "lo": 8, "hi": 11 },
+      "population": { "lo": 50, "hi": 80 },
+      "science": { "lo": 100, "hi": 180 },
+      "culture": { "lo": 100, "hi": 180 },
+      "production": { "lo": 180, "hi": 300 },
+      "goldNet": { "lo": 30, "hi": 70 },
+      "policies": ["POLICY_DIPLOMATIC_LEAGUE"],
+      "notes": "议会决议开始积累"
+    },
+    {
+      "eraId": "ERA_INDUSTRIAL",
+      "turnLo": 180,
+      "turnHi": 215,
+      "cities": { "lo": 9, "hi": 12 },
+      "population": { "lo": 60, "hi": 90 },
+      "science": { "lo": 180, "hi": 300 },
+      "culture": { "lo": 180, "hi": 300 },
+      "production": { "lo": 250, "hi": 420 },
+      "goldNet": { "lo": 40, "hi": 90 },
+      "policies": ["POLICY_CHARISMATIC_LEADER"],
+      "notes": "城邦宗主数量最大化"
+    },
+    {
+      "eraId": "ERA_MODERN",
+      "turnLo": 210,
+      "turnHi": 240,
+      "cities": { "lo": 10, "hi": 13 },
+      "population": { "lo": 65, "hi": 100 },
+      "science": { "lo": 250, "hi": 420 },
+      "culture": { "lo": 250, "hi": 420 },
+      "production": { "lo": 300, "hi": 500 },
+      "goldNet": { "lo": 50, "hi": 110 },
+      "notes": "外交点接近 20"
+    },
+    {
+      "eraId": "ERA_ATOMIC",
+      "turnLo": 235,
+      "turnHi": 255,
+      "cities": { "lo": 10, "hi": 13 },
+      "population": { "lo": 70, "hi": 105 },
+      "science": { "lo": 350, "hi": 550 },
+      "culture": { "lo": 350, "hi": 550 },
+      "production": { "lo": 350, "hi": 550 },
+      "goldNet": { "lo": 60, "hi": 130 },
+      "policies": ["POLICY_FUTURE_VICTORY_DIPLOMATIC"],
+      "notes": "未来政策 +2 外交点/回合"
+    },
+    {
+      "eraId": "ERA_INFORMATION",
+      "turnLo": 250,
+      "turnHi": 280,
+      "cities": { "lo": 10, "hi": 13 },
+      "population": { "lo": 70, "hi": 110 },
+      "science": { "lo": 450, "hi": 700 },
+      "culture": { "lo": 450, "hi": 700 },
+      "production": { "lo": 400, "hi": 650 },
+      "goldNet": { "lo": 70, "hi": 150 },
+      "civics": ["CIVIC_GLOBALIZATION"],
+      "notes": "20 外交点锁定"
+    }
+  ]
+}
