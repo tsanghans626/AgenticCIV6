@@ -1,7 +1,7 @@
 {
   "name": "civi6-kb-adapter",
   "version": "0.1.0",
-  "description": "Civilization VI knowledge base: read-only SQLite build pipeline + DeepSeek Harness plugin (query tools)",
+  "description": "Civilization VI knowledge base: read-only SQLite build pipeline, decision slices (kb_*) + DeepSeek Harness plugin (query tools)",
   "type": "module",
   "private": true,
   "engines": {
@@ -16,7 +16,15 @@
     "fetch:bbg": "node --import ./scripts/ts-loader.mjs src/cli.ts fetch-bbg",
     "reindex": "node --import ./scripts/ts-loader.mjs src/cli.ts reindex",
     "reindex:bbg": "node --import ./scripts/ts-loader.mjs src/cli.ts reindex --source bbg",
+    "effects:build": "node --import ./scripts/ts-loader.mjs src/cli.ts effects-build",
+    "effects:build:bbg": "node --import ./scripts/ts-loader.mjs src/cli.ts effects-build --source bbg",
+    "kb:build": "node --import ./scripts/ts-loader.mjs src/cli.ts kb-build",
+    "kb:build:bbg": "node --import ./scripts/ts-loader.mjs src/cli.ts kb-build --source bbg",
+    "kb:verify": "node scripts/verify-kb.mjs",
     "verify": "node scripts/verify-sources.mjs",
+    "verify:parity": "node --import ./scripts/ts-loader.mjs scripts/verify-spec-parity.mjs",
+    "verify:plugin": "node scripts/verify-plugin.mjs",
+    "verify:effects": "node scripts/verify-effects.mjs && npm run verify:parity && npm run verify:plugin",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

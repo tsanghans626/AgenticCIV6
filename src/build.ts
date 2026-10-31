@@ -8,6 +8,9 @@ import { buildEntityIndex } from "./entities.js";
 import { buildSearchIndex, buildStats, hasSearchIndex, type SearchIndexStats } from "./searchindex.js";
 import { loadBbgModInfo } from "./bbg/modinfo.js";
 import { applyBbg } from "./bbg/apply.js";
+import { buildKb, hasKb, type KbBuildResult } from "./kb/buildkb.js";
+import { buildEffectCards, ensureEffectCards, hasEffectCards, type EffectStats } from "./effects.js";
+import { buildRulesetInfo, writeRulesetMeta } from "./ruleset.js";
 
 export interface BbgBuildInfo {
   ref: string;
@@ -34,6 +37,8 @@ export interface BuildResult {
   index?: SearchIndexStats;
   loadOrder: { id: string; dir: string }[];
   bbg?: BbgBuildInfo;
+  effects?: EffectStats;
+  kb?: Pick<KbBuildResult, "plans" | "targets" | "budgets" | "checks" | "cards" | "validation">;
 }
 
 interface StoredBuildMeta {
@@ -157,6 +162,8 @@ export async function build(config: Config, opts: { force?: boolean } = {}): Pro
   let textEntries = 0;
   let entityDocs = 0;
   let index: SearchIndexStats | undefined;
+  let kbInfo: BuildResult["kb"];
+  let effectStats: EffectStats | undefined;
 
   if (needsBuild) {
     const ing = ingestData(kb, config);
@@ -166,12 +173,24 @@ export async function build(config: Config, opts: { force?: boolean } = {}): Pro
     const loc = ingestLocalizedText(kb, config);
     textEntries = loc.entries;
 
+    const builtAt = new Date().toISOString();
+    effectStats = buildEffectCards(kb, "vanilla", { rawBuiltAt: builtAt, builtAt });
     entityDocs = buildEntityIndex(kb);
+    const kbResult = buildKb(kb, "vanilla", { rawBuiltAt: builtAt, builtAt });
+    kbInfo = {
+      plans: kbResult.plans,
+      targets: kbResult.targets,
+      budgets: kbResult.budgets,
+      checks: kbResult.checks,
+      cards: kbResult.cards,
+      validation: kbResult.validation,
+    };
     index = buildSearchIndex(kb);
     buildStats(kb);
+    tables = kb.listTables().length;
 
     const meta = {
-      builtAt: new Date().toISOString(),
+      builtAt,
       dataSource: "vanilla",
       source: config.paths.assets,
       langs: config.langs,
@@ -185,6 +204,15 @@ export async function build(config: Config, opts: { force?: boolean } = {}): Pro
     const ins = kb.db.prepare(`INSERT OR REPLACE INTO "_meta" ("key","value") VALUES (?,?);`);
     ins.run("build", JSON.stringify(meta));
     ins.run("dbFile", dbFile);
+    writeRulesetMeta(
+      kb,
+      buildRulesetInfo("vanilla", {
+        builtAt,
+        dbFile,
+        source: config.paths.assets,
+        loadOrder: order.dataDirs,
+      }),
+    );
   } else {
     const metaRow = kb.get<{ value: string }>(`SELECT value FROM _meta WHERE key = 'build';`);
     if (metaRow) {
@@ -195,6 +223,45 @@ export async function build(config: Config, opts: { force?: boolean } = {}): Pro
       entityDocs = m.entityDocs;
     }
     tables = kb.listTables().length;
+    const metaBuiltAt: string | undefined =
+      metaRow ? (JSON.parse(metaRow.value) as { builtAt?: string }).builtAt : undefined;
+
+    let entityIndexRebuilt = false;
+    if (!hasEffectCards(kb)) {
+      console.log("检测到效果事实层缺失/陈旧，重建…");
+      effectStats = ensureEffectCards(kb, "vanilla") ?? undefined;
+      entityDocs = buildEntityIndex(kb);
+      entityIndexRebuilt = true;
+    }
+
+    // Databases built before the decision layer existed are upgraded in place.
+    // Keep the KB in sync with the raw build timestamp so BBG overlays cannot
+    // silently serve vanilla targets.
+    const kbMeta = kb.get<{ value: string }>(`SELECT value FROM _meta WHERE key = 'kb.build';`);
+    const kbRawBuiltAt = kbMeta
+      ? (JSON.parse(kbMeta.value) as { rawBuiltAt?: string }).rawBuiltAt
+      : undefined;
+    const needKb = !hasKb(kb) || (!!metaBuiltAt && kbRawBuiltAt !== metaBuiltAt);
+    if (needKb) {
+      console.log("检测到 KB 层缺失/陈旧，重建决策层…");
+      const kbResult = buildKb(kb, "vanilla", { rawBuiltAt: metaBuiltAt ?? null, builtAt: new Date().toISOString() });
+      kbInfo = {
+        plans: kbResult.plans,
+        targets: kbResult.targets,
+        budgets: kbResult.budgets,
+        checks: kbResult.checks,
+        cards: kbResult.cards,
+        validation: kbResult.validation,
+      };
+      index = buildSearchIndex(kb);
+      buildStats(kb);
+    } else if (entityIndexRebuilt) {
+      readKbInfo(kb, (info) => { kbInfo = info; });
+      index = buildSearchIndex(kb);
+      buildStats(kb);
+    } else {
+      readKbInfo(kb, (info) => { kbInfo = info; });
+    }
 
     // Databases built before the read-optimised index existed are upgraded in
     // place instead of forcing a full rebuild from the game data.
@@ -204,6 +271,17 @@ export async function build(config: Config, opts: { force?: boolean } = {}): Pro
       buildStats(kb);
     } else if (!kb.get(`SELECT 1 FROM _meta WHERE key = 'stats';`)) {
       buildStats(kb);
+    }
+    if (!kb.get(`SELECT 1 FROM _meta WHERE key = 'ruleset';`)) {
+      writeRulesetMeta(
+        kb,
+        buildRulesetInfo("vanilla", {
+          builtAt: metaBuiltAt ?? new Date().toISOString(),
+          dbFile,
+          source: config.paths.assets,
+          loadOrder: order.dataDirs,
+        }),
+      );
     }
   }
 
@@ -218,7 +296,40 @@ export async function build(config: Config, opts: { force?: boolean } = {}): Pro
     durationMs: Date.now() - t0,
     index,
     loadOrder: order.dataDirs,
+    effects: effectStats,
+    kb: kbInfo,
   };
+}
+
+/** Read the stored KB counters without running a build. */
+function readKbInfo(kb: KnowledgeDb, set: (info: NonNullable<BuildResult["kb"]>) => void): void {
+  const row = kb.get<{ value: string }>(`SELECT value FROM _meta WHERE key = 'kb.build';`);
+  if (!row?.value) return;
+  const m = JSON.parse(row.value) as {
+    plans?: number; targets?: number; budgets?: number; checks?: number; cards?: number;
+  };
+  const v = kb.get<{ value: string }>(`SELECT value FROM _meta WHERE key = 'kb.validation';`);
+  const validation = v?.value
+    ? (JSON.parse(v.value) as { ok: boolean; errors: number; warnings: number })
+    : { ok: true, errors: 0, warnings: 0 };
+  set({
+    plans: m.plans ?? 0,
+    targets: m.targets ?? 0,
+    budgets: m.budgets ?? 0,
+    checks: m.checks ?? 0,
+    cards: m.cards ?? 0,
+    validation: {
+      ok: validation.ok,
+      errors: validation.errors,
+      warnings: validation.warnings,
+      issues: [],
+      stats: {
+        plans: 0, targets: 0, budgets: 0, checks: 0, cards: 0, effects: 0, costs: 0,
+        unlocks: 0, closure: 0, civs: 0, nodes: 0, objectives: 0, constraints: 0,
+        focus: 0, capabilities: 0, supplies: 0, ledger: 0, cuts: 0, scenarios: 0,
+      },
+    },
+  });
 }
 
 /**
@@ -232,12 +343,12 @@ export async function buildBbg(config: BbgConfig, opts: { force?: boolean } = {}
 
   let baseMeta = readBuildMeta(config.baseDbFile);
   if (!baseMeta) {
-    console.log("未找到有效的原版知识库，先构建原版…");
+    console.log("未找到有效的标准规则知识库，先构建标准库…");
     await build(loadConfig(), { force: false });
     baseMeta = readBuildMeta(config.baseDbFile);
   }
   if (!baseMeta) {
-    throw new Error(`原版知识库无效：${config.baseDbFile}\n请先运行：npm run build`);
+    throw new Error(`标准规则知识库无效：${config.baseDbFile}\n请先运行：npm run build`);
   }
 
   let stored: StoredBuildMeta | null = null;
@@ -272,18 +383,13 @@ export async function buildBbg(config: BbgConfig, opts: { force?: boolean } = {}
     let textEntries: number;
     let entityDocs: number;
     let loadOrder: { id: string; dir: string }[];
+    let kbInfo: BuildResult["kb"];
+    let effectStats: EffectStats | undefined;
 
     if (!valid) {
       const mod = loadBbgModInfo(config.bbgDir);
       const applied = applyBbg(kb, mod, { dir: config.bbgDir, langs: config.langs });
-      entityDocs = buildEntityIndex(kb);
-      index = buildSearchIndex(kb);
-      buildStats(kb);
-
-      tables = kb.listTables().length;
-      rowsInserted = baseMeta.rowsInserted ?? 0;
-      textEntries = kb.countRows("LocalizedText");
-      loadOrder = baseMeta.loadOrder ?? [];
+      const bbgBuiltAt = new Date().toISOString();
       bbgInfo = {
         ref: config.bbgRef,
         modVersion: mod.version,
@@ -296,9 +402,58 @@ export async function buildBbg(config: BbgConfig, opts: { force?: boolean } = {}
         skipped: applied.skipped,
         warnings: applied.warnings,
       };
-
+      effectStats = buildEffectCards(kb, "bbg", { rawBuiltAt: bbgBuiltAt, builtAt: bbgBuiltAt });
+      entityDocs = buildEntityIndex(kb);
+      // Write the raw-build anchor before the KB pass: an overlay starts from
+      // a copy of the vanilla DB, so the copied `_meta.build` would otherwise
+      // look stale during KB validation.
       writeMeta(kb, "build", {
-        builtAt: new Date().toISOString(),
+        builtAt: bbgBuiltAt,
+        dataSource: "bbg",
+        source: baseMeta.source ?? null,
+        baseDb: config.baseDbFile,
+        langs: config.langs,
+        tables: kb.listTables().length,
+        rowsInserted: baseMeta.rowsInserted ?? 0,
+        textEntries: kb.countRows("LocalizedText"),
+        entityDocs,
+        loadOrder: baseMeta.loadOrder ?? [],
+        bbg: bbgInfo,
+      });
+      writeRulesetMeta(
+        kb,
+        buildRulesetInfo("bbg", {
+          builtAt: bbgBuiltAt,
+          dbFile: config.dbFile,
+          source: baseMeta.source ?? null,
+          loadOrder: baseMeta.loadOrder ?? [],
+          bbg: bbgInfo,
+          baseBuiltAt: bbgInfo.baseBuiltAt ?? null,
+        }),
+      );
+      const kbResult = buildKb(kb, "bbg", {
+        // The raw mirror is this BBG database, so its own build timestamp is
+        // the staleness anchor; `baseBuiltAt` is tracked separately in bbgInfo.
+        rawBuiltAt: bbgBuiltAt,
+        builtAt: bbgBuiltAt,
+      });
+      kbInfo = {
+        plans: kbResult.plans,
+        targets: kbResult.targets,
+        budgets: kbResult.budgets,
+        checks: kbResult.checks,
+        cards: kbResult.cards,
+        validation: kbResult.validation,
+      };
+      index = buildSearchIndex(kb);
+      buildStats(kb);
+
+      tables = kb.listTables().length;
+      rowsInserted = baseMeta.rowsInserted ?? 0;
+      textEntries = kb.countRows("LocalizedText");
+      loadOrder = baseMeta.loadOrder ?? [];
+      writeMeta(kb, "build", {
+        builtAt: bbgBuiltAt,
         dataSource: "bbg",
         source: baseMeta.source ?? null,
         baseDb: config.baseDbFile,
@@ -323,14 +478,64 @@ export async function buildBbg(config: BbgConfig, opts: { force?: boolean } = {}
       if (!kb.hasTable("search_docs")) {
         console.log("检测到不完整的 BBG 库，补齐实体文档与检索索引…");
         entityDocs = buildEntityIndex(kb);
+      }
+
+      let entityIndexRebuilt = false;
+      if (!hasEffectCards(kb)) {
+        console.log("检测到 BBG 效果事实层缺失/陈旧，重建…");
+        effectStats = ensureEffectCards(kb, "bbg") ?? undefined;
+        entityDocs = buildEntityIndex(kb);
+        entityIndexRebuilt = true;
+      }
+
+      const kbMeta = kb.get<{ value: string }>(`SELECT value FROM _meta WHERE key = 'kb.build';`);
+      const kbRawBuiltAt = kbMeta
+        ? (JSON.parse(kbMeta.value) as { rawBuiltAt?: string }).rawBuiltAt
+        : undefined;
+      const metaBuiltAt = typeof meta.builtAt === "string" ? meta.builtAt : undefined;
+      if (!hasKb(kb) || (metaBuiltAt && kbRawBuiltAt !== metaBuiltAt)) {
+        console.log("检测到 BBG KB 层缺失/陈旧，重建决策层…");
+        const kbResult = buildKb(kb, "bbg", {
+          rawBuiltAt: metaBuiltAt ?? new Date().toISOString(),
+          builtAt: metaBuiltAt ?? new Date().toISOString(),
+        });
+        kbInfo = {
+          plans: kbResult.plans,
+          targets: kbResult.targets,
+          budgets: kbResult.budgets,
+          checks: kbResult.checks,
+          cards: kbResult.cards,
+          validation: kbResult.validation,
+        };
         index = buildSearchIndex(kb);
         buildStats(kb);
-      } else if (!hasSearchIndex(kb)) {
+      } else if (entityIndexRebuilt) {
+        readKbInfo(kb, (info) => { kbInfo = info; });
+        index = buildSearchIndex(kb);
+        buildStats(kb);
+      } else {
+        readKbInfo(kb, (info) => { kbInfo = info; });
+      }
+
+      if (!hasSearchIndex(kb)) {
         console.log("检测到旧 BBG 库，补齐检索索引与统计…");
         index = buildSearchIndex(kb);
         buildStats(kb);
       } else if (!kb.get(`SELECT 1 FROM _meta WHERE key = 'stats';`)) {
         buildStats(kb);
+      }
+      if (!kb.get(`SELECT 1 FROM _meta WHERE key = 'ruleset';`)) {
+        writeRulesetMeta(
+          kb,
+          buildRulesetInfo("bbg", {
+            builtAt: metaBuiltAt ?? new Date().toISOString(),
+            dbFile: config.dbFile,
+            source: baseMeta.source ?? null,
+            loadOrder,
+            bbg: bbgInfo,
+            baseBuiltAt: bbgInfo.baseBuiltAt ?? null,
+          }),
+        );
       }
     }
 
@@ -346,6 +551,8 @@ export async function buildBbg(config: BbgConfig, opts: { force?: boolean } = {}
       index,
       loadOrder,
       bbg: bbgInfo,
+      effects: effectStats,
+      kb: kbInfo,
     };
   } catch (error) {
     try {

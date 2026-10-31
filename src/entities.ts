@@ -6,6 +6,7 @@ export type ModifierResolverName =
   | "civilization"
   | "leader"
   | "greatperson"
+  | "belief"
   | "none";
 
 export interface EntitySpec {
@@ -173,7 +174,97 @@ export const SPECS: EntitySpec[] = [
     docTables: [],
     modifierResolver: "greatperson",
   },
+  {
+    type: "belief", table: "Beliefs", pk: "BeliefType", loc: "LOC_BELIEF_",
+    stats: ["BeliefClassType"],
+    related: [{ table: "BeliefModifiers", fk: "BeliefType" }],
+    docTables: [],
+    modifierResolver: "belief",
+  },
+  {
+    // Governor ownership is a separate relation (GovernorPromotionSets), not a
+    // property of the promotion id. BBG reassigns promotions between governors
+    // while keeping the vanilla id prefix, so the promotion entity must expose
+    // its owners explicitly instead of letting callers infer them from the id.
+    type: "governor", table: "Governors", pk: "GovernorType", loc: "LOC_GOVERNOR_",
+    stats: [],
+    related: [{ table: "GovernorPromotionSets", fk: "GovernorType" }],
+    docTables: [],
+    modifierResolver: "none",
+  },
+  {
+    type: "governor_promotion", table: "GovernorPromotions", pk: "GovernorPromotionType", loc: "LOC_GOVERNOR_PROMOTION_",
+    stats: ["Level", "Column"],
+    related: [{ table: "GovernorPromotionSets", fk: "GovernorPromotion" }],
+    docTables: [],
+    modifierResolver: "direct",
+  },
 ];
+
+/**
+ * The one join that defines governor ownership: a promotion can belong to zero
+ * or more governors (GovernorPromotionSets), and the id prefix is never
+ * authoritative. The search document and the SQL view below expose the same
+ * relation.
+ */
+const GOVERNOR_OWNER_SQL = `
+  SELECT s.GovernorPromotion AS promotion, s.GovernorType AS governor
+    FROM GovernorPromotionSets s
+    JOIN Governors g ON g.GovernorType = s.GovernorType;`;
+
+/** Create the raw-SQL compatibility view so ad-hoc queries cannot read the id prefix as ownership. */
+function ensureGovernorView(kb: KnowledgeDb): void {
+  if (
+    !kb.hasTable("GovernorPromotions") ||
+    !kb.hasTable("GovernorPromotionSets") ||
+    !kb.hasTable("Governors")
+  ) {
+    return;
+  }
+  kb.exec(`DROP VIEW IF EXISTS "v_governor_promotion";`);
+  kb.exec(`
+    CREATE VIEW "v_governor_promotion" AS
+    SELECT p.GovernorPromotionType AS promotion_id,
+           p.Level AS level,
+           p."Column" AS promotion_column,
+           s.GovernorType AS governor_id,
+           (SELECT Text FROM LocalizedText WHERE Tag = p.Name AND Language = 'zh_Hans_CN' LIMIT 1) AS name_zh,
+           (SELECT Text FROM LocalizedText WHERE Tag = p.Description AND Language = 'zh_Hans_CN' LIMIT 1) AS description_zh,
+           (SELECT Text FROM LocalizedText WHERE Tag = g.Name AND Language = 'zh_Hans_CN' LIMIT 1) AS governor_name_zh
+      FROM GovernorPromotions p
+      LEFT JOIN GovernorPromotionSets s ON s.GovernorPromotion = p.GovernorPromotionType
+      LEFT JOIN Governors g ON g.GovernorType = s.GovernorType;
+  `);
+}
+
+interface GovernorDocContext {
+  ownersByPromotion: Map<string, string[]>;
+  promotionsByGovernor: Map<string, string[]>;
+}
+
+/** Build the localized id -> label maps once per index rebuild. */
+function buildGovernorDocContext(kb: KnowledgeDb, nameIndex: Map<string, NameIndexEntry>): GovernorDocContext {
+  const ownersByPromotion = new Map<string, string[]>();
+  const promotionsByGovernor = new Map<string, string[]>();
+  if (!kb.hasTable("GovernorPromotionSets") || !kb.hasTable("Governors")) {
+    return { ownersByPromotion, promotionsByGovernor };
+  }
+  const label = (id: string) => {
+    const e = nameIndex.get(id);
+    return e ? `${e.zh}（${id}）` : id;
+  };
+  for (const row of kb.all<{ promotion: string; governor: string }>(GOVERNOR_OWNER_SQL)) {
+    const owner = label(row.governor);
+    const list = ownersByPromotion.get(row.promotion) ?? [];
+    if (!list.includes(owner)) list.push(owner);
+    ownersByPromotion.set(row.promotion, list);
+    const promotions = promotionsByGovernor.get(row.governor) ?? [];
+    const promotion = label(row.promotion);
+    if (!promotions.includes(promotion)) promotions.push(promotion);
+    promotionsByGovernor.set(row.governor, promotions);
+  }
+  return { ownersByPromotion, promotionsByGovernor };
+}
 
 /** Localize a text tag for a language (fallback to English, then raw tag). */
 export function localize(kb: KnowledgeDb, tag: unknown, lang: string): string | undefined {
@@ -238,14 +329,31 @@ function buildDoc(
   spec: EntitySpec,
   row: Record<string, unknown>,
   nameIndex: Map<string, NameIndexEntry>,
+  governorContext?: GovernorDocContext,
 ): string {
   const id = String(row[spec.pk]);
   const en = localize(kb, row.Name ?? `${spec.loc}${id}_NAME`, "en_US") ?? id;
   const zh = localize(kb, row.Name ?? `${spec.loc}${id}_NAME`, "zh_Hans_CN") ?? en;
-  const descEn = row.Description ? localize(kb, row.Description, "en_US") ?? "" : "";
-  const descZh = row.Description ? localize(kb, row.Description, "zh_Hans_CN") ?? "" : "";
+  const card = kb.hasTable("effect_cards")
+    ? kb.get<{ description_zh: string | null; description_en: string | null; effects_json: string | null }>(
+        `SELECT description_zh, description_en, effects_json FROM effect_cards WHERE card_id = ?;`,
+        `${spec.type}:${id}`,
+      )
+    : undefined;
+  const descEn = card?.description_en ?? (row.Description ? localize(kb, row.Description, "en_US") ?? "" : "");
+  const descZh = card?.description_zh ?? (row.Description ? localize(kb, row.Description, "zh_Hans_CN") ?? "" : "");
 
   const chunks: string[] = [en, zh];
+  // Ownership goes before the long description so a 200-char search snippet
+  // still answers "whose promotion is this?".
+  if (spec.type === "governor_promotion" && governorContext) {
+    const owners = governorContext.ownersByPromotion.get(id);
+    if (owners?.length) chunks.push(`归属：${owners.join("、")}`);
+  }
+  if (spec.type === "governor" && governorContext) {
+    const promotions = governorContext.promotionsByGovernor.get(id);
+    if (promotions?.length) chunks.push(`晋升：${promotions.join("、")}`);
+  }
   if (descEn) chunks.push(descEn);
   if (descZh) chunks.push(descZh);
   const stats = renderStats(row, spec.stats);
@@ -286,6 +394,19 @@ function buildDoc(
       chunks.push(t.trim());
     }
   }
+
+  // The build-time effect layer is the canonical, player-facing text. Append it
+  // so BM25 can find "神社 +2 生产力" without the model having to know tables.
+  if (card?.effects_json) {
+    try {
+      for (const effect of JSON.parse(card.effects_json) as { text_zh?: string; text_en?: string }[]) {
+        if (effect.text_zh && !chunks.includes(effect.text_zh)) chunks.push(effect.text_zh);
+        if (effect.text_en && !chunks.includes(effect.text_en)) chunks.push(effect.text_en);
+      }
+    } catch {
+      /* corrupted card: entity doc still works */
+    }
+  }
   return chunks.filter(Boolean).join("\n");
 }
 
@@ -301,10 +422,13 @@ export function buildEntityIndex(kb: KnowledgeDb): number {
       "meta" TEXT
     );
   `);
-  // A BBG build starts from a copy of the vanilla DB; clear stale documents
-  // before rebuilding so deleted entities cannot linger.
-  kb.db.exec(`DELETE FROM "search_docs";`);
+  // A BBG build starts from a copy of the vanilla DB; clear stale entity
+  // documents before rebuilding so deleted entities cannot linger. Plan cards
+  // are owned by the KB layer and must survive an entity-index rebuild.
+  kb.db.exec(`DELETE FROM "search_docs" WHERE "type" <> 'card';`);
+  ensureGovernorView(kb);
   const nameIndex = buildNameIndex(kb);
+  const governorContext = buildGovernorDocContext(kb, nameIndex);
   const ins = kb.db.prepare(
     `INSERT OR REPLACE INTO "search_docs" ("id","type","name","name_zh","doc","meta") VALUES (?,?,?,?,?,?);`,
   );
@@ -318,7 +442,7 @@ export function buildEntityIndex(kb: KnowledgeDb): number {
         const id = String(row[spec.pk]);
         const en = localize(kb, row.Name ?? `${spec.loc}${id}_NAME`, "en_US") ?? id;
         const zh = localize(kb, row.Name ?? `${spec.loc}${id}_NAME`, "zh_Hans_CN") ?? en;
-        const doc = buildDoc(kb, spec, row, nameIndex);
+        const doc = buildDoc(kb, spec, row, nameIndex, governorContext);
         const meta = JSON.stringify({ type: spec.type, id });
         ins.run(`${spec.type}:${id}`, spec.type, en, zh, doc, meta);
         count++;

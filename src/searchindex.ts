@@ -127,10 +127,22 @@ export function buildStats(kb: KnowledgeDb): void {
     count: kb.hasTable(s.table) ? kb.countRows(s.table) : 0,
   }));
 
+  let effectMeta: Record<string, unknown> = {};
+  try {
+    const row = kb.get<{ value: string }>(`SELECT value FROM _meta WHERE key = 'effects';`);
+    if (row?.value) effectMeta = JSON.parse(row.value) as Record<string, unknown>;
+  } catch {
+    effectMeta = {};
+  }
+
   setMeta(kb, "stats", {
     tables,
     entityTypes,
     searchDocs: kb.hasTable("search_docs") ? kb.countRows("search_docs") : 0,
+    effectCards: effectMeta.cards ?? 0,
+    effects: effectMeta.effects ?? 0,
+    effectsResolved: effectMeta.resolved ?? 0,
+    effectsUnresolved: effectMeta.unresolved ?? 0,
     generatedAt: new Date().toISOString(),
   });
 }

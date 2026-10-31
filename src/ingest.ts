@@ -58,7 +58,12 @@ export function discoverLoadOrder(config: Config, opts: { skipScenarios?: boolea
   const dataFiles: string[] = [];
 
   for (const d of dataDirs) {
-    for (const f of readdirSync(d.dir).sort()) {
+    // `*_RemoveData.xml` deletes rows the expansion or a later DLC replaces.
+    // In the game's load order they run BEFORE the add files of the same pack;
+    // alphabetically they sort after (`Civics.xml` < `RemoveData.xml`), which
+    // wipes the freshly added rows instead. Apply removals first.
+    const rank = (name: string) => (/removedata/i.test(name) ? 0 : 1);
+    for (const f of readdirSync(d.dir).sort((a, b) => rank(a) - rank(b) || a.localeCompare(b))) {
       const full = join(d.dir, f);
       if (!statSync(full).isFile()) continue;
       if (f.endsWith(".sql")) schemaFiles.push(full);

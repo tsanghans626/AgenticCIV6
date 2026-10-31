@@ -34,11 +34,11 @@ function check(label, actual, expected) {
 
 function checkVanilla() {
   if (!existsSync(vanillaFile)) {
-    throw new Error(`原版数据库不存在：${vanillaFile}\n请先运行：npm run build`);
+    throw new Error(`标准规则数据库不存在：${vanillaFile}\n请先运行：npm run build`);
   }
   const db = open(vanillaFile);
   try {
-    console.log(`原版: ${vanillaFile}`);
+    console.log(`标准规则: ${vanillaFile}`);
     check(
       "UNIT_GIANT_DEATH_ROBOT",
       scalar(db, "SELECT Combat, AntiAirCombat FROM Units WHERE UnitType = 'UNIT_GIANT_DEATH_ROBOT'"),
@@ -59,6 +59,12 @@ function checkVanilla() {
       scalar(db, "SELECT Value FROM ModifierArguments WHERE ModifierId = 'GDR_AA_DEFENSE' AND Name = 'Amount'").Value,
       "40",
     );
+    // Inspiration/eureka rows: `*_RemoveData.xml` must run before the add
+    // files of the same pack, otherwise the base 112 rows are deleted and the
+    // ledger loses every early-game inspiration.
+    const boosts = scalar(db, "SELECT COUNT(*) AS n FROM Boosts").n;
+    assert.ok(boosts >= 100, `Boosts 只有 ${boosts} 行（预期 ≥100）：检查 RemoveData 加载顺序`);
+    console.log(`  ✓ Boosts 行数: ${boosts}`);
   } finally {
     close(db);
   }
