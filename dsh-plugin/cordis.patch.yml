@@ -2,11 +2,15 @@
     - id: civi6-kb
       name: "@local/civi6-kb"
       config:
-        # 默认数据源：vanilla（原版）或 bbg（BBG）。
-        # 每个工具也可传 source: "vanilla" | "bbg" 临时切换。
-        dataSource: bbg
-        # 相对路径以插件目录（dsh-plugin/）为基准解析，因此换机器、换工作目录都不用改。
-        # 绝对值也可以直接写，例如 D:\Code\AgenticCIV6\data\civi6.sqlite
+        # 唯一规则：bbg（BBG 7.5.1，基于风云际会标准规则）。
+        # 允许值：bbg | vanilla（vanilla 内部键 = 标准规则，含迭起兴衰/风云际会/DLC）。
+        # 运行期没有按调用切换的 source 参数；改规则请改这里并重载插件。
+        ruleset: bbg
+        lockRuleset: true
+        # 严格模式：拒绝通过 pwsh/bash 直接读取 Civ6 数据库；只允许 civi6_* 工具。
+        strictGrounding: true
+        # 缺少效果事实层时拒绝启动，避免退回“靠模型记忆描述效果”。
+        effectCardsRequired: true
         dbPaths:
           vanilla: ../data/civi6.sqlite
           bbg: ../data/civi6-bbg.sqlite

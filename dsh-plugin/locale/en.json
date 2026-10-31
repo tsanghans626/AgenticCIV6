@@ -1,6 +1,6 @@
 {
   "meta": {
-    "title": "Civ6 Knowledge Base",
-    "description": "Query the local Civilization VI knowledge base (vanilla or BBG ruleset): BM25 search, entity detail, modifier effect chains, and read-only SQL."
+    "title": "Civ6 Knowledge Base (Ruleset Locked)",
+    "description": "Civilization VI knowledge base locked to BBG 7.5.1 (Gathering Storm standard rules): canonical effect cards, BM25 search, entity details, decision slices and read-only SQL."
   }
 }
