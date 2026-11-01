@@ -142,7 +142,7 @@ try {
   assert.ok(inst.params.some(([name]) => String(name).startsWith("TOURISM_")), "缺少旅游参数");
   assert.equal(inst.greatPersonClasses.length, 10, `伟人职业 ${inst.greatPersonClasses.length}`);
   assert.ok(inst.gppBaseCost.length >= 8, "缺少伟人基础成本");
-  const policySection = kb.instance({ ...baseInstanceArgs, section: "content-b" });
+  const policySection = kb.instance({ ...baseInstanceArgs, section: "content-c" });
   assert.ok(
     Object.values(policySection.content).some((sec) => {
       const fx = sec.columns.indexOf("fx");
