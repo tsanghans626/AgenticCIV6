@@ -254,6 +254,11 @@ try {
   assert.deepEqual(cell(unit, tagma, "replaces"), ["UNIT_KNIGHT"], `甲胄 replaces=${JSON.stringify(cell(unit, tagma, "replaces"))}`);
   const knight = rowOf(unit, "UNIT_KNIGHT");
   assert.ok((cell(unit, knight, "replacedBy") ?? []).includes("UNIT_BYZANTINE_TAGMA"), "骑士 replacedBy 缺甲胄");
+  // `Units_XP2.ResourceCost` is a leftover on units that declare no strategic
+  // resource; shipping it reads as a requirement, so it must be null.
+  assert.equal(cell(unit, tagma, "res"), null, "甲胄不应有战略资源");
+  assert.equal(cell(unit, tagma, "resq"), null, `甲胄 resq=${cell(unit, tagma, "resq")}（应为 null）`);
+  assert.ok(cell(unit, knight, "resq") > 0, "骑士 resq 应保留");
 
   const hippodrome = rowOf(inst.content.district, "DISTRICT_HIPPODROME");
   assert.deepEqual(cell(inst.content.district, hippodrome, "replaces"), ["DISTRICT_ENTERTAINMENT_COMPLEX"]);
@@ -316,7 +321,7 @@ try {
   console.log(`✓ 会话夹具：17b596ad 的 ${SESSION_FIXTURE.length} 个实体全部可从包内回答`);
 
   // --- deterministic scratchpad -------------------------------------------
-  const ev = kb.eval({ builds: ["BUILDING_LIBRARY"], cities: 3, popPerCity: 4, victory: "culture" });
+  const ev = kb.eval({ builds: ["BUILDING_LIBRARY"], cities: 3, popPerCity: 4, victory: "culture", speed: "standard" });
   const science = ev.metrics.find((m) => m.dimension === "science_per_turn");
   assert.equal(science?.supply, 6, `图书馆×3 科技供应=${science?.supply}`);
   assert.equal(science?.composition[0]?.id, "BUILDING_LIBRARY", "构成清单缺少来源");
@@ -331,6 +336,7 @@ try {
     eraIndex: 3,
     eraId: "ERA_RENAISSANCE",
     victory: "culture",
+    speed: "standard",
   });
   assert.ok(evalPlan.path?.closure >= 5, `前置闭包 ${evalPlan.path?.closure}`);
   assert.ok(evalPlan.ledger.length >= 2, `账本行 ${evalPlan.ledger.length}`);
@@ -347,6 +353,70 @@ try {
   assertLossless(evalPlan);
   console.log(
     `✓ eval：${ev.metrics.length} 维度 / 账本 ${evalPlan.ledger.length} 币种 / 砍单 ${evalPlan.cut.length} / 情景 3 / 闭包 ${evalPlan.path.closure}`,
+  );
+
+  // --- speed basis: every cost and deadline states its units --------------
+  // The regression this pins: the same gate set used to return identical costs
+  // and deadlines for standard and online, next to speedProfile.costMultiplier=50,
+  // leaving the model to guess whether it still had to halve them.
+  const gateSet = ["CIVIC_DIVINE_RIGHT", "CIVIC_REFORMED_CHURCH", "CIVIC_MERCENARIES"];
+  const evalArgs = { builds: ["BUILDING_MONUMENT"], gates: gateSet, cities: 6, popPerCity: 8, eraId: "ERA_MEDIEVAL" };
+  const evalStd = kb.eval({ ...evalArgs, speed: "standard" });
+  const evalOnline = kb.eval({ ...evalArgs, speed: "online" });
+  const stdRow = evalStd.ledger.find((r) => r.currency === "culture");
+  const onlRow = evalOnline.ledger.find((r) => r.currency === "culture");
+  const speedProfiles = kb.meta().speedProfiles;
+  const onlineProfile = speedProfiles.find((s) => s.speed === "online");
+  const standardProfile = speedProfiles.find((s) => s.speed === "standard");
+  assert.ok(stdRow && onlRow, "缺少文化账本行");
+  assert.equal(onlRow.required, stdRow.required / 2, `联机需求 ${onlRow.required} != 标准 ${stdRow.required} / 2`);
+  assert.equal(
+    onlRow.requiredPerTurn,
+    stdRow.requiredPerTurn,
+    "成本与回合同时折算时 requiredPerTurn 必须不变（双缩放校验）",
+  );
+  assert.equal(
+    evalOnline.deadline.turn,
+    Math.round((evalStd.deadline.turn * onlineProfile.totalTurns) / standardProfile.totalTurns),
+    `联机截止回合 ${evalOnline.deadline.turn} 未按 totalTurns 比例压缩`,
+  );
+  assert.equal(evalOnline.path.totalCost.culture, evalStd.path.totalCost.culture / 2, "path.totalCost 未折算");
+  assert.equal(evalOnline.cut[0].cost, evalStd.cut[0].cost / 2, "cut.cost 未折算");
+  assert.equal(
+    evalOnline.cut[0].slipTurns,
+    Math.ceil(evalOnline.cut[0].cost / onlRow.supplyPerTurn),
+    "slipTurns 必须用已折成本 ÷ 未折供给",
+  );
+  assert.equal(evalStd.basis.costMultiplier, standardProfile.costMultiplier / 100, "standard basis 倍数不对");
+  assert.equal(evalOnline.basis.costMultiplier, onlineProfile.costMultiplier / 100, "online basis 倍数不对");
+  assert.equal(evalOnline.basis.turnScale, onlineProfile.totalTurns / standardProfile.totalTurns, "turnScale 不对");
+  assert.equal(evalOnline.basis.applied, true, "basis.applied 应为 true");
+  assert.equal(evalOnline.assumptions.speed, "online", "assumptions 缺 speed");
+  assert.equal(evalOnline.deadline.timeBasis, "online", "deadline 缺 timeBasis");
+
+  // The same numbers must appear in the packet the model reads.
+  const stdCivic = kb.instance({ civ: "Byzantium", leader: "Basil II", speed: "standard", section: "civic-tree" });
+  const onlCivic = kb.instance({ civ: "Byzantium", leader: "Basil II", speed: "online", section: "civic-tree" });
+  const civicCost = (page, id) => {
+    const section = page.content.civic;
+    return section.rows.find((row) => row[section.columns.indexOf("id")] === id)[section.columns.indexOf("cost")];
+  };
+  const stdCost = civicCost(stdCivic, "CIVIC_DIVINE_RIGHT");
+  const onlCost = civicCost(onlCivic, "CIVIC_DIVINE_RIGHT");
+  assert.equal(onlCost, stdCost / 2, `行内 cost 未按速度折算：${stdCost} → ${onlCost}`);
+  const onlCore = kb.instance({ civ: "Byzantium", leader: "Basil II", speed: "online", section: "core" });
+  assert.equal(onlCore.instance.costBasis.multiplier, onlineProfile.costMultiplier / 100, "core 缺 costBasis");
+  assert.equal(onlCore.instance.costBasis.applied, true, "core.costBasis.applied 应为 true");
+
+  // No silent defaults: an era-less deadline used to fall back to ERA_ANCIENT.
+  assert.throws(
+    () => kb.eval({ builds: ["BUILDING_MONUMENT"], gates: gateSet, speed: "online" }),
+    /eraId/,
+    "有 gates 但没给 eraId 时没有报错",
+  );
+  assert.throws(() => kb.eval({ builds: ["BUILDING_MONUMENT"], speed: "epic" }), /speed 未知/, "未知速度没有报错");
+  console.log(
+    `✓ 速度口径：成本 ×${evalStd.basis.costMultiplier}→×${evalOnline.basis.costMultiplier} / deadline ${evalStd.deadline.turn}→${evalOnline.deadline.turn} / requiredPerTurn 不变 / basis 与 meta 一致`,
   );
 
   // Governor ownership is a relation, not an id prefix. BBG keeps the vanilla
@@ -554,10 +624,18 @@ try {
     builds: ["BUILDING_LIBRARY"],
     gates: ["CIVIC_HUMANISM"],
     cities: 4,
+    speed: "online",
+    eraId: "ERA_MEDIEVAL",
   });
   assert.ok(hostEval.ledger.length >= 1, "host eval 缺少账本");
   assert.ok(hostEval.path?.closure >= 2, "host eval 缺少前置闭包");
+  assert.equal(hostEval.basis?.speed, "online", "host eval 缺 basis.speed");
   assert.equal(hostEval._workBudget, undefined, "旧 _workBudget 不应再出现");
+  // The tool schema must force the two inputs that used to be silently defaulted.
+  const evalParams = registered.civi6_eval.parameters;
+  assert.deepEqual(evalParams.required, ["builds", "speed"], `eval required=${JSON.stringify(evalParams.required)}`);
+  assert.ok(evalParams.properties.speed, "eval 缺 speed 参数");
+  assert.match(evalParams.properties.eraId.description, /REQUIRED/, "eraId 说明未标注必填于 gates");
 
   // A packet row can still be resolved by its handle for QA, but the model has
   // no tool that accepts one; the handle index and the resolver must agree on pk

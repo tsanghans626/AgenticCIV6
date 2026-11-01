@@ -3397,8 +3397,8 @@ const INSTANCE_LEGEND = {
     unlocks: "该市政解锁的句柄数组（政策/政体/单位/建筑/区域/改良等）",
   },
   unit: {
-    resq: "战略资源需求量（Units_XP2.ResourceCost）",
-    resm: "每回合资源维护量",
+    resq: "战略资源需求量（Units_XP2.ResourceCost）；res 为空时本列为 null——那只是残留列，不代表需要资源",
+    resm: "每回合资源维护量（同样要求 res 非空）",
     replaces: "该单位替代的基础单位（独特单位才有）",
     replacedBy: "被哪些独特单位替代（关系表，不看 id 前缀）",
   },
@@ -3467,6 +3467,15 @@ const INSTANCE_GAPS = [
       "单位 ability 行由 TypeTags 标签闭包生成（含跨文明条件条目），不是该单位的能力归属；单位自身能力写在 unit 的 eff 描述里，其余按“数据层未解析”处理",
   },
   { what: "光环/叠加上限等隐藏机制", reason: "包内只有官方文本与公式；是否作用于自身、能否叠加不在数据层结论里，遇到时答“数据层未解析”" },
+  {
+    what: "速度换算的精度",
+    reason:
+      "成本按 Gamespeeds.CostMultiplier 等比缩放、回合按 kb_speed_profile.total_turns 比例压缩（都是 empirical：数据只有一个全局倍数）；游戏内取整与逐项倍率可能不同，0.5 级别的差以游戏内为准",
+  },
+  {
+    what: "每时代截止回合的实测值",
+    reason: "kb_era_window.turn_hi 是按标准节奏给的经验带（confidence 0.6），联机档只是按总回合数等比压缩，没有逐时代实测",
+  },
   { what: "总督就任/调任的成本与忠诚度机制", reason: "库里只有总督与晋升本身；机制数值不在规则库" },
 ];
 
@@ -3504,7 +3513,7 @@ const INSTANCE_CLASSES = [
     section: "tech-tree",
     kinds: ["technology"],
     definition:
-      "科技树结构：每个科技是节点，行含时代、成本、树位(treeRow)、树深(depth)、AND 前置(req)、后继(children)、解锁句柄(unlocks)、尤里卡(boost)、官方描述(eff)。不含 OR 型前置与政策/政体以外的解锁来源。",
+      "科技树结构：每个科技是节点，行含时代、成本（本实例速度口径，见 instance.costBasis）、树位(treeRow)、树深(depth)、AND 前置(req)、后继(children)、解锁句柄(unlocks)、尤里卡(boost)、官方描述(eff)。不含 OR 型前置与政策/政体以外的解锁来源。",
     whenToUse:
       "要在某个时代规划科技路线、判断“这条线值不值得绕”、看某科技解锁了什么、算前置闭包时取；配 eval 的 gates 用。",
   },
@@ -3512,7 +3521,7 @@ const INSTANCE_CLASSES = [
     section: "civic-tree",
     kinds: ["civic"],
     definition:
-      "市政树结构：每个市政是节点，行含时代、成本、树位(treeRow)、树深(depth)、前置(req)、后继(children)、解锁句柄(unlocks，含政策与政体)、鼓舞(boost)、官方描述(eff)。政府解锁在 unlocks 里指向 multipliers 的政体行。",
+      "市政树结构：每个市政是节点，行含时代、成本（本实例速度口径，见 instance.costBasis）、树位(treeRow)、树深(depth)、前置(req)、后继(children)、解锁句柄(unlocks，含政策与政体)、鼓舞(boost)、官方描述(eff)。政府解锁在 unlocks 里指向 multipliers 的政体行。",
     whenToUse:
       "要规划市政顺序、抢政体/政策槽、判断“先点哪个市政”时取；与 tech-tree 常成对取。",
   },
@@ -3635,6 +3644,50 @@ function isPlaceholderFormula(desc, template) {
   return MECHANISM_TEMPLATES.has(String(template ?? ""));
 }
 
+/**
+ * Speed is a hard constraint, so every number a tool ships has to say which speed
+ * it is expressed in. Both factors come from data, never from a literal:
+ * `kb_speed_profile.cost_multiplier` mirrors `Gamespeeds.CostMultiplier`, and the
+ * turn ratio is `total_turns / base total_turns` — the same rule the retired
+ * objective engine used (`src/kb/engine.ts`: `turnScale = speed.totalTurns /
+ * baseTurns`, `speed.costMultiplier / 100`).
+ *
+ * The current eval/instance pair used to ship raw base costs with no label at
+ * all, which is why a model reading "Divine Right 340" next to
+ * "costMultiplier: 50" could not tell whether it still had to halve them.
+ */
+function speedBasis(ctx, speed) {
+  const wanted = speed === "online" ? "online" : "standard";
+  if (speed !== undefined && speed !== null && speed !== "" && speed !== "standard" && speed !== "online") {
+    throw new Error(`speed 未知："${speed}"（可用：standard / online）`);
+  }
+  const rows = hasTable(ctx, "kb_speed_profile")
+    ? q(ctx, "SELECT speed, total_turns, cost_multiplier FROM kb_speed_profile;")
+    : [];
+  const byId = new Map(rows.map((r) => [String(r.speed), r]));
+  const base =
+    rows.find((r) => Number(r.cost_multiplier) === 100) ??
+    rows.slice().sort((a, b) => (Number(b.total_turns) || 0) - (Number(a.total_turns) || 0))[0] ??
+    null;
+  const row = byId.get(wanted) ?? base ?? null;
+  const multiplier = row && Number(row.cost_multiplier) > 0 ? Number(row.cost_multiplier) / 100 : 1;
+  const baseTurns = base && Number(base.total_turns) > 0 ? Number(base.total_turns) : null;
+  const turns = row && Number(row.total_turns) > 0 ? Number(row.total_turns) : null;
+  return {
+    speed: row ? wanted : "standard",
+    costMultiplier: multiplier,
+    turnScale: baseTurns && turns ? turns / baseTurns : 1,
+    applied: !!row,
+    source: row ? "kb_speed_profile (Gamespeeds.CostMultiplier)" : "fallback",
+    confidence: row ? 1 : 0.3,
+  };
+}
+
+/** Costs are game units, not floats: keep at most two decimals. */
+function roundCost(value) {
+  return Math.round(Number(value) * 100) / 100;
+}
+
 function buildInstanceData(ctx, args) {
   if (!hasTable(ctx, "kb_formula") || !hasTable(ctx, "kb_formula_owner")) {
     throw new Error(
@@ -3648,6 +3701,9 @@ function buildInstanceData(ctx, args) {
   // derived tables are keyed by, so resolve the civ board against that.
   const source = rulesetMeta.id ?? effectsMeta.rulesetId ?? "bbg";
   const speed = args.speed === "online" ? "online" : "standard";
+  // Every cost this packet ships is in the instance's speed units (see
+  // `instance.costBasis`); raw base costs stay in the database.
+  const basis = speedBasis(ctx, speed);
 
   // --- instance parameters (hard constraints only) -------------------------
   const eraRows = hasTable(ctx, "Eras")
@@ -3951,6 +4007,14 @@ function buildInstanceData(ctx, args) {
       // therefore dropped from `fx`; it never invalidates an `eff` sentence.
       const unres = unparsedFormulas;
       const eff = effByOwner.get(cardKey) ?? null;
+      // A cost without a speed is a trap: the tree row has to be in the same
+      // units as the instance's `speed` hard constraint.
+      const costValue = (raw) => {
+        if (raw === null || raw === undefined || raw === "") return null;
+        const value = Number(raw);
+        if (!Number.isFinite(value)) return raw;
+        return roundCost(value * basis.costMultiplier);
+      };
       const raw = (col) => (col && cols.has(col) ? row[col] ?? null : null);
       const replaces = replacesOf.get(id) ?? null;
       const resourceRow = unitResourceFacts.get(id);
@@ -3984,10 +4048,13 @@ function buildInstanceData(ctx, args) {
             return raw("PromotionClass");
           case "res":
             return raw("StrategicResource");
+          // `Units_XP2.ResourceCost` survives on some units whose `Units` row
+          // declares no strategic resource; shipping that number would read as a
+          // requirement, so it is dropped instead.
           case "resq":
-            return resourceRow?.ResourceCost ?? null;
+            return raw("StrategicResource") ? resourceRow?.ResourceCost ?? null : null;
           case "resm":
-            return resourceRow?.ResourceMaintenanceAmount ?? null;
+            return raw("StrategicResource") ? resourceRow?.ResourceMaintenanceAmount ?? null : null;
           case "replaces":
             return replaces;
           case "replacedBy":
@@ -4031,7 +4098,7 @@ function buildInstanceData(ctx, args) {
             return null;
         }
       };
-      const rowOut = [handle, id, nameTag, eraIdx, row[spec.cost] ?? null, fx, unres];
+      const rowOut = [handle, id, nameTag, eraIdx, costValue(row[spec.cost]), fx, unres];
       for (const field of fields) rowOut.push(fieldValue(field));
       out.push(rowOut);
       kindRows.set(`${spec.kind}:${id}`, { id, era, row: rowOut });
@@ -4264,7 +4331,7 @@ function buildInstanceData(ctx, args) {
         row: "行 = [h, id, name, era, cost, fx, unres, ...content[kind].columns 第 7 位起]；各 kind 字段不同，按 columns 取，不要按位置猜",
         name: "LOC 标签（由 name_zh 解析）或原名",
         era: "eras[] 下标（0 基）",
-        cost: "该 kind 的主成本（科技=科技值，市政=文化值，其余=生产力）",
+        cost: "本实例速度口径、已按 instance.costBasis.multiplier 折算（科技=科技值，市政=文化值，其余=生产力）；不要再乘速度",
         fx: "已解析公式摘要（kb_formula 渲染，最多 3 条；占位行已滤掉）",
         unres: "因没有真实描述而被 fx 丢弃的机制行数。要数值且 fx 为空时用它回答“数据层未解析”；有 eff 时照常引用文本，两者不互斥",
         eff: "权威文本数组（effect_cards 已解析效果，官方描述/相邻加成/产出行等）",
@@ -4298,6 +4365,15 @@ function buildInstanceData(ctx, args) {
       leader: civRow?.leader_id ?? null,
       speed,
       difficulty: args.difficulty ?? null,
+      // What units every cost in this packet is expressed in. `applied:false`
+      // means the profile row was missing and the multiplier fell back to 1.
+      costBasis: {
+        speed: basis.speed,
+        multiplier: basis.costMultiplier,
+        applied: basis.applied,
+        source: basis.source,
+        confidence: basis.confidence,
+      },
       speedProfile: speedRow
         ? { totalTurns: speedRow.total_turns, costMultiplier: speedRow.cost_multiplier }
         : null,
@@ -4436,7 +4512,7 @@ function instanceTool(getKb) {
   return makeTool({
     name: "civi6_instance",
     description:
-      "Objective-free instance packet, one data class per call. Fetch section='core' first: it carries the hard constraints (civ/leader/speed/difficulty), the civ kit full text, the neutral indexes, city-states, global parameters, and manifest.classes with each class's whenToUse/rows/bytes. Then fetch ONLY the 2-5 classes the question touches (tech-tree, civic-tree, units, districts, buildings, tiles, multipliers, beliefs, promotions, governors) — do not fetch all of them. Every class returns definition (what the class is and what it does NOT contain) and whenToUse (when to ask for it) as separate fields. Every row is already join'd: [h, id, name, era, cost, fx, unres, ...content[kind].columns from index 7]; eff is the authoritative official text, fx the parsed formula summary, unres the count of unparsed mechanism rows (when >0 answer '数据层未解析' and do not fill in). Read `columns`/`legend`, never guess a position. There is no SQL tool and no per-entity drill-down tool: this packet plus civi6_eval plus civi6_meta is the whole data surface. Changing victory line does NOT require a re-fetch; changing civ/leader/speed does. A class that would exceed its budget fails loudly instead of being truncated.",
+      "Objective-free instance packet, one data class per call. Fetch section='core' first: it carries the hard constraints (civ/leader/speed/difficulty), the civ kit full text, the neutral indexes, city-states, global parameters, and manifest.classes with each class's whenToUse/rows/bytes. Every `cost` in this packet is already in this instance's speed units — `instance.costBasis` echoes the multiplier and the source; do not multiply by the speed percentage again. Then fetch ONLY the 2-5 classes the question touches (tech-tree, civic-tree, units, districts, buildings, tiles, multipliers, beliefs, promotions, governors) — do not fetch all of them. Every class returns definition (what the class is and what it does NOT contain) and whenToUse (when to ask for it) as separate fields. Every row is already join'd: [h, id, name, era, cost, fx, unres, ...content[kind].columns from index 7]; eff is the authoritative official text, fx the parsed formula summary, unres the count of unparsed mechanism rows (when >0 answer '数据层未解析' and do not fill in). Read `columns`/`legend`, never guess a position. There is no SQL tool and no per-entity drill-down tool: this packet plus civi6_eval plus civi6_meta is the whole data surface. Changing victory line does NOT require a re-fetch; changing civ/leader/speed does. A class that would exceed its budget fails loudly instead of being truncated.",
     parameters: {
       type: "object",
       properties: {
@@ -4655,6 +4731,8 @@ function buildEvalResult(ctx, args) {
   const cities = Number.isFinite(args.cities) ? Number(args.cities) : 1;
   const popPerCity = Number.isFinite(args.popPerCity) ? Number(args.popPerCity) : 1;
   const eraIndex = Number.isFinite(args.eraIndex) ? Number(args.eraIndex) : null;
+  // The internal QA API defaults to standard; the model-facing tool requires it.
+  const basis = speedBasis(ctx, args.speed ?? "standard");
 
   const rows = [];
   for (const part of chunk(uniq(builds), 300)) {
@@ -4761,18 +4839,42 @@ function buildEvalResult(ctx, args) {
 
   // ---- required side: gate closure -> per-currency ledger ----------------
   const gates = Array.isArray(args.gates) ? args.gates.map(String).filter(Boolean) : [];
-  const deadline = eraDeadline(ctx, source, args.eraId ? String(args.eraId) : null, eraIndex);
+  // Era windows are authored for the standard pace; compress them with the same
+  // ratio the retired engine used (`src/kb/engine.ts` turnScale).
+  const rawDeadline = eraDeadline(ctx, source, args.eraId ? String(args.eraId) : null, eraIndex);
+  const deadline = {
+    ...rawDeadline,
+    turn: Math.max(1, Math.round(rawDeadline.turn * basis.turnScale)),
+    turnScale: basis.turnScale,
+    timeBasis: basis.speed,
+    unscaledTurn: rawDeadline.turn,
+  };
   let pathOut = null;
   let ledger = [];
   let cut = [];
   let scenarios = [];
   if (gates.length) {
+    // A deadline without an era is meaningless: the old code silently used the
+    // Ancient window (turn 50), which turned every mid-game plan into "short".
+    if (!args.eraId && eraIndex === null) {
+      const eras = (hasTable(ctx, "kb_era_window")
+        ? q(ctx, "SELECT era_id FROM kb_era_window WHERE source = ? ORDER BY era_index;", source).map((r) => String(r.era_id))
+        : hasTable(ctx, "Eras")
+          ? q(ctx, "SELECT EraType AS era_id FROM Eras ORDER BY ChronologyIndex;").map((r) => String(r.era_id))
+          : []
+      ).filter(Boolean);
+      throw new Error(
+        `civi6_eval: 计算 gates 必须给 eraId（或 eraIndex），否则只能拿某个默认时代当分母。可用：${eras.join(" / ") || "none"}`,
+      );
+    }
     const graph = loadPlanGraph(ctx);
     const closure = closureOf(graph, gates, 250);
     const nodes = [];
     const requiredByCurrency = {};
     for (const [id, depth] of closure) {
-      const cost = graph.costs.get(id) ?? 0;
+      // Costs come from the raw tables (standard units); scale them into the
+      // requested speed before they touch any sum.
+      const cost = roundCost((graph.costs.get(id) ?? 0) * basis.costMultiplier);
       const kind = kindOfEntityId(id);
       const currency = COST_CURRENCY[kind] ?? "production";
       if (cost > 0) requiredByCurrency[currency] = (requiredByCurrency[currency] ?? 0) + cost;
@@ -4838,7 +4940,25 @@ function buildEvalResult(ctx, args) {
   }
 
   return {
-    assumptions: { cities, popPerCity, eraIndex, builds: builds.length, gates: gates.length },
+    assumptions: {
+      speed: basis.speed,
+      eraId: args.eraId ?? null,
+      eraIndex,
+      cities,
+      popPerCity,
+      builds: builds.length,
+      gates: gates.length,
+    },
+    // Every absolute cost below is already in `basis.speed` units; supply is a
+    // per-turn rate and therefore speed-invariant.
+    basis: {
+      speed: basis.speed,
+      costMultiplier: basis.costMultiplier,
+      turnScale: basis.turnScale,
+      applied: basis.applied,
+      source: basis.source,
+      confidence: basis.confidence,
+    },
     ledger,
     metrics,
     path: pathOut,
@@ -4848,9 +4968,10 @@ function buildEvalResult(ctx, args) {
     deadline,
     missingBuilds: missing,
     note:
-      "供应 = Σ(公式值 × 份数) 后再乘百分比；per=adjacent/resource/trade_route 的份数按 1 城计（assumedPerCopy）。" +
-      "需求 = gates 的前置闭包成本 ÷ 该时代截止回合（kb_era_window.turn_hi，empirical，保留 confidence）。" +
-      "cut 的 slipTurns = 该节点成本 ÷ 对应产出的每回合供给（无供给则 null）。",
+      "供应 = Σ(公式值 × 份数) 后再乘百分比；per=adjacent/resource/trade_route 的份数按 1 城计（assumedPerCopy），且不随速度缩放。" +
+      "需求 = gates 前置闭包成本 × costMultiplier，再 ÷ 该时代截止回合（kb_era_window.turn_hi × turnScale；两者都来自 kb_speed_profile，标 empirical）。" +
+      "cut 的 slipTurns = 已折成本 ÷ 每回合供给（无供给则 null）。" +
+      "deficit/verdict 用同一口径：成本已折算、供给未折算。",
   };
 }
 
@@ -4858,7 +4979,7 @@ function evalTool(getKb) {
   return makeTool({
     name: "civi6_eval",
     description:
-      "Deterministic scratchpad over the formula layer. Supply side: a candidate build set + city/pop/era assumptions -> per-dimension supply with the top contributors. Required side: a gate set (techs/civics/buildings/units/projects) -> prerequisite closure, per-currency ledger (required vs supply per turn, gap, verdict), ranked cut list with slipTurns, and low/base/high scenarios. Fetches no data. Call it instead of doing arithmetic in prose.",
+      "Deterministic scratchpad over the formula layer. Supply side: a candidate build set + city/pop/era assumptions -> per-dimension supply with the top contributors. Required side: a gate set (techs/civics/buildings/units/projects) -> prerequisite closure, per-currency ledger (required vs supply per turn, gap, verdict), ranked cut list with slipTurns, and low/base/high scenarios. Every cost it returns is already expressed in `speed` units (costMultiplier applied) and every deadline in `speed` turns (turnScale applied); `basis` echoes what was applied, supply is speed-invariant. Pass eraId whenever you pass gates — there is no default era. Fetches no data. Call it instead of doing arithmetic in prose.",
     parameters: {
       type: "object",
       properties: {
@@ -4871,19 +4992,29 @@ function evalTool(getKb) {
           type: "array",
           items: { type: "string" },
           description:
-            "Required-side entity ids (e.g. TECH_EDUCATION, CIVIC_THEOLOGY, BUILDING_UNIVERSITY). Their prerequisite closure is costed and compared against supply.",
+            "Required-side entity ids (e.g. TECH_EDUCATION, CIVIC_THEOLOGY, BUILDING_UNIVERSITY). Their prerequisite closure is costed and compared against supply. Costs are multiplied by the speed's costMultiplier, so pass the same speed as the instance.",
         },
         cities: { type: "integer", description: "How many cities have the build set. Default 1." },
         popPerCity: { type: "integer", description: "Population per city (used by per=pop formulas). Default 1." },
         eraIndex: { type: "integer", description: "Era index from instance.eras (0-based), for per=era formulas." },
+        speed: {
+          type: "string",
+          enum: ["standard", "online"],
+          description:
+            "Hard constraint: the game speed every cost and deadline is expressed in. Must match the instance. Costs ×= kb_speed_profile.cost_multiplier, era windows ×= total_turns ratio.",
+        },
         victory: {
           type: "string",
           enum: ["science", "culture", "religion", "domination", "diplomatic"],
           description: "Optional: attach the plan band demand for this victory line.",
         },
-        eraId: { type: "string", description: "Optional era id (ERA_ANCIENT ...) to filter the demand band." },
+        eraId: {
+          type: "string",
+          description:
+            "Planning era (ERA_ANCIENT ... ERA_INFORMATION). REQUIRED whenever gates are given: the deadline denominator comes from this era's window, and there is no safe default.",
+        },
       },
-      required: ["builds"],
+      required: ["builds", "speed"],
     },
     execute: (args) => {
       assertNoSource(args);
@@ -5224,8 +5355,8 @@ function buildReasoningPrompt() {
 “怎么玩 / 时代规划 / 取舍”类问题，数据只取一次，其余全靠公式与账本。
 
 1. 第 1 步只取 civi6_instance({ civ, leader, speed, difficulty, section:'core' })：它由硬约束决定，含文明套件全文、城邦、中立索引、GlobalParameters 子集，以及 gaps/omitted 两张“这里没有”的清单。然后读 core.manifest.classes 里每一类的 whenToUse 与 bytes，只再取问题真正涉及的 2~5 类（tech-tree / civic-tree / units / districts / buildings / tiles / multipliers / beliefs / promotions / governors），不要一次全取。换胜利线不重取；换文明或速度才重取。
-2. 每类都自带 definition（这一类是什么、不含什么）与 whenToUse（什么时候取），按需读，不要靠猜。行按 content[kind].columns 读，不要按位置猜：官方全文（eff）、已解析公式摘要（fx）、未解析计数（unres）、解锁科技/市政（tech/civic）、前置（req）、单位战力/移动/维护/晋升类/战略资源/升级与取代（cs/rc/mv/mt/pc/res/up/replaces/replacedBy）、政策槽（slot）、信条类别（cls）、政体等级与槽位数（tier/slots）、晋升等级与列（lvl/col）、科技树位与解锁（treeRow/depth/children/unlocks）、总督归属（gov）、城邦宗主加成（cityStates）。数据面只有 instance / eval / meta，没有 SQL 工具，也没有单实体放大镜工具。
-3. 算账一律调用 civi6_eval：builds 给供给侧、gates 给需求侧（会展开前置闭包并计成本），返回 ledger（每币种 required / requiredPerTurn / supplyPerTurn / gap / verdict）、cut（砍单与 slipTurns）、scenarios（low/base/high）与 composition（谁贡献了多少，带 fx_id）。想让某单位/建筑进 plan，就把它的 tech/civic 直接喂给 gates。禁止心算，禁止把描述文字当数字。
+2. 每类都自带 definition（这一类是什么、不含什么）与 whenToUse（什么时候取），按需读，不要靠猜。行按 content[kind].columns 读，不要按位置猜：官方全文（eff）、已解析公式摘要（fx）、未解析计数（unres）、**成本（cost，已是本实例速度口径，见 instance.costBasis，不要再乘速度）**、解锁科技/市政（tech/civic）、前置（req）、单位战力/移动/维护/晋升类/战略资源/升级与取代（cs/rc/mv/mt/pc/res/up/replaces/replacedBy）、政策槽（slot）、信条类别（cls）、政体等级与槽位数（tier/slots）、晋升等级与列（lvl/col）、科技树位与解锁（treeRow/depth/children/unlocks）、总督归属（gov）、城邦宗主加成（cityStates）。数据面只有 instance / eval / meta，没有 SQL 工具，也没有单实体放大镜工具。
+3. 算账一律调用 civi6_eval，并且 **speed 必传**（与实例一致）、**给 gates 时 eraId 必传**（它决定分母；没有默认时代）。返回的 required / path.totalCost / cut.cost 已按该速度折算，deadline.turn 已按该速度压缩，supply 是不随速度变化的每回合产出；返回的 basis 字段回显了所用的 costMultiplier 与 turnScale。其余：builds 给供给侧、gates 给需求侧（会展开前置闭包并计成本）、ledger（每币种 required / requiredPerTurn / supplyPerTurn / gap / verdict）、cut（砍单与 slipTurns）、scenarios（low/base/high）与 composition（谁贡献了多少，带 fx_id）。想让某单位/建筑进 plan，就把它的 tech/civic 直接喂给 gates。禁止心算，禁止把描述文字当数字。
 4. 要某个数值确实不在包里时，先查 core.gaps 与 core.omitted——写在那里的一律回答“数据层未收录”，不得用记忆补；两者都没有就是看漏了行，回去按 columns 找。行内 unres 是“没有真实描述、已从 fx 丢弃的机制行数”：要数值却没有 fx、且 unres>0 时答“数据层未解析”，但不要因此否定同一行的 eff 文本。
 5. 答案固定 6 段：约束方程 / 供给计划 / 砍单 / 情景 / 路径 / 验收；每段引用 civi6_eval 字段与行内字段，末行“数据依据：BBG 7.5.1 / <entity ids 或句柄>”。`;
 }
@@ -5245,6 +5376,7 @@ function buildRulesetPrompt(ruleset, build) {
 - 内部 ID 的前缀不编码归属：例如 GOVERNOR_PROMOTION_EDUCATOR_* 在 BBG 里可能属于其他总督。总督/晋升归属只认 civi6_instance 的 governors 类里 gov 列（或 v_governor_promotion 视图），禁止按 ID 前缀、名称片段或旧对话推断。
 - 行内 eff 是已解析的权威效果文本，fx 是可执行公式；unres 只是未解析机制计数（>0 即“数据层未解析”）。用户问效果时只引用 eff/fx，不要用记忆补写隐藏机制。
 - 决策数值来自 civi6_eval 的公式组合与计划带（empirical/rule），引用时保留 confidence/source。
+- 成本与回合都带速度口径：行内 cost、eval 的 required/cut/deadline 已按 speed 折算，basis 与 instance.costBasis 回显 costMultiplier 与 turnScale。不要再乘 50% 或在标准/联机之间二次换算；要换档就换实例的 speed 重新取。
 - 回答含文明6事实时，末尾加：数据依据：${label} / <entity ids>。
 - 用户要另一套规则时，说明需修改插件配置 ruleset 并重载，不能按调用切换。${excluded.length ? `\n- 可选子模组未启用：${excluded.join("、")}。` : ""}`;
 }
