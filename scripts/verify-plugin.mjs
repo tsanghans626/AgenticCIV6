@@ -154,9 +154,11 @@ try {
 
   // Every page must fit the transport; oversize is an error, never a cut.
   const sectionNames = ["core", "content-a", "content-b", "content-c", "content-d"];
+  const sectionSizes = {};
   for (const name of sectionNames) {
     const page = kb.instance({ ...baseInstanceArgs, section: name });
     const text = renderToolPayload("instance", page);
+    sectionSizes[name] = text.length;
     assert.ok(text.length <= 44000, `分片 ${name} ${text.length} > 44000`);
     assert.ok(text.length < 50000, `分片 ${name} ${text.length} 超过传输上限`);
     const parsed = JSON.parse(text);
@@ -170,7 +172,7 @@ try {
   for (const sec of Object.values(inst.content)) for (const row of sec.rows) allIds.add(row[1]);
   assert.equal(allIds.size, 1036, `合并后实体 ${allIds.size} ≠ 1036（979 + 8 总督 + 49 总督晋升）`);
   console.log(
-    `✓ instance：5 分片重建 ${inst.integrity.rows} 行 / 内联边 ${inst.integrity.inlineEdges} / 城邦 ${inst.cityStates.length} / gaps ${inst.gaps.length}`,
+    `✓ instance：5 分片重建 ${inst.integrity.rows} 行 / 内联边 ${inst.integrity.inlineEdges} / 城邦 ${inst.cityStates.length} / gaps ${inst.gaps.length} / 体积 ${sectionNames.map((name) => `${name} ${(sectionSizes[name] / 1024).toFixed(1)}KB`).join(" · ")}`,
   );
 
   // Deterministic scratchpad: composes formulas, never fetches.
