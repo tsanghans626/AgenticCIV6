@@ -2605,23 +2605,28 @@ export function createKnowledgeBase(dbPath, sourceName = "vanilla") {
     }
 
     const stats = ctx.statsCache;
-    const entityTypes =
-      stats?.entityTypes?.map((t) => ({ ...t })) ??
-      SPECS.map((s) => ({
-        type: s.type,
-        table: s.table,
-        count: hasTable(ctx, s.table) ? (q1(ctx, `SELECT COUNT(*) AS n FROM "${s.table}";`)?.n ?? 0) : 0,
-      }));
-    // The cached stats blob predates any newly added entity type; never hide a
-    // type the plugin can actually serve.
-    const knownTypes = new Set(entityTypes.map((t) => t.type));
-    for (const spec of SPECS) {
-      if (knownTypes.has(spec.type)) continue;
-      entityTypes.push({
-        type: spec.type,
-        table: spec.table,
-        count: hasTable(ctx, spec.table) ? (q1(ctx, `SELECT COUNT(*) AS n FROM "${spec.table}";`)?.n ?? 0) : 0,
-      });
+    // Entity-type inventory is a maintenance view now that the per-entity tool is
+    // gone; the model-facing inventory is `civi6_instance` → core.manifest.
+    let entityTypes = null;
+    if (opts.verbose) {
+      entityTypes =
+        stats?.entityTypes?.map((t) => ({ ...t })) ??
+        SPECS.map((s) => ({
+          type: s.type,
+          table: s.table,
+          count: hasTable(ctx, s.table) ? (q1(ctx, `SELECT COUNT(*) AS n FROM "${s.table}";`)?.n ?? 0) : 0,
+        }));
+      // The cached stats blob predates any newly added entity type; never hide a
+      // type the plugin can actually serve.
+      const knownTypes = new Set(entityTypes.map((t) => t.type));
+      for (const spec of SPECS) {
+        if (knownTypes.has(spec.type)) continue;
+        entityTypes.push({
+          type: spec.type,
+          table: spec.table,
+          count: hasTable(ctx, spec.table) ? (q1(ctx, `SELECT COUNT(*) AS n FROM "${spec.table}";`)?.n ?? 0) : 0,
+        });
+      }
     }
     const tables = stats?.tables ?? [];
 
@@ -2633,7 +2638,7 @@ export function createKnowledgeBase(dbPath, sourceName = "vanilla") {
       tableCount: tables.length || ctx.tables.size,
       searchDocs: stats?.searchDocs ?? indexMeta(ctx).docs ?? 0,
       searchIndex: postingsAvailable(ctx) ? "precomputed" : "in-memory",
-      entityTypes,
+      ...(entityTypes ? { entityTypes } : {}),
     };
 
     const rulesetRow = hasTable(ctx, "_meta")
@@ -2729,21 +2734,24 @@ export function createKnowledgeBase(dbPath, sourceName = "vanilla") {
     },
 
     /**
-     * One bounded page of the objective-free instance packet. Pass
-     * section:'all' only in tests to get every page merged (the model never
-     * needs it: four parallel calls are the contract).
+     * One bounded data class of the objective-free instance packet. Pass
+     * section:'all' only in tests to get every class merged (the model never
+     * needs it: core + the classes the question touches are the contract).
      */
     instance(opts = {}) {
       const section = String(opts?.section ?? "core");
       if (section !== "all") return buildInstanceSection(ctx, opts ?? {}, section);
-      const pages = Object.keys(INSTANCE_SECTIONS).map((name) =>
-        buildInstanceSection(ctx, opts ?? {}, name),
-      );
+      const pages = INSTANCE_CLASSES.map((entry) => buildInstanceSection(ctx, opts ?? {}, entry.section));
       const merged = { ...pages[0], content: {} };
       for (const page of pages) {
         Object.assign(merged.content, page.content ?? {});
       }
       return merged;
+    },
+
+    /** Resolve a packet handle (u37 / t72 / gp9) to its entity id; QA/tests only. */
+    entityFromHandle(value) {
+      return entityIdFromHandle(ctx, value);
     },
 
     /** Deterministic formula scratchpad (no data fetch). */
@@ -3242,6 +3250,10 @@ function compactSchemaPayload(value, level) {
 
 /** One place per tool family: budget, compaction ladder and recovery hint. */
 const RENDER = {
+  instance: {
+    budget: TOOL_BUDGETS.instance,
+    recover: "该类超过预算时 execute 会直接报错；按 kind 拆小再取，不要交给传输层截断。",
+  },
   entity: {
     budget: TOOL_BUDGETS.entity,
     compact: compactEntityPayload,
@@ -3288,7 +3300,7 @@ function metaTool(getKb) {
   return makeTool({
     name: "civi6_meta",
     description:
-      "Active Civilization VI ruleset, build provenance, entity types and effect coverage, plus speedProfiles (total turns and cost multiplier per speed). Cheap; call once per session. Pass verbose:true only when you also need the full table list and the build load order.",
+      "Active Civilization VI ruleset, build provenance, effect/formula coverage, and speedProfiles (total turns and cost multiplier per speed). Cheap; call once per session. The inventory of data classes and their sizes lives in `civi6_instance` → core.manifest, not here. Pass verbose:true only when you also need the full table list, the entity-type inventory and the build load order.",
     parameters: {
       type: "object",
       properties: {
@@ -3322,6 +3334,8 @@ const INSTANCE_KINDS = [
   { kind: "belief", handle: "bl", table: "Beliefs", pk: "BeliefType", name: "Name", era: null, cost: null },
   { kind: "improvement", handle: "i", table: "Improvements", pk: "ImprovementType", name: "Name", era: null, cost: null },
   { kind: "resource", handle: "r", table: "Resources", pk: "ResourceType", name: "Name", era: null, cost: null },
+  { kind: "terrain", handle: "te", table: "Terrains", pk: "TerrainType", name: "Name", era: null, cost: null },
+  { kind: "feature", handle: "fe", table: "Features", pk: "FeatureType", name: "Name", era: null, cost: null },
   { kind: "project", handle: "pr", table: "Projects", pk: "ProjectType", name: "Name", era: null, cost: "Cost" },
   { kind: "promotion", handle: "pm", table: "UnitPromotions", pk: "UnitPromotionType", name: "Name", era: null, cost: null },
   { kind: "governor", handle: "gv", table: "Governors", pk: "GovernorType", name: "Name", era: null, cost: null },
@@ -3329,26 +3343,28 @@ const INSTANCE_KINDS = [
 ];
 
 /**
- * Fields appended to every row after the shared [h, id, name, era, cost, fx]
+ * Fields appended to every row after the shared [h, id, name, era, cost, fx, unres]
  * prefix, so a row is already join'd: unlock, prerequisites and the stats that
  * decide timing are inline instead of being recoverable only from edge lists.
  * The order here IS the column order reported in `content[kind].columns`.
  */
 const INSTANCE_FIELDS = {
-  technology: ["req", "boost"],
-  civic: ["req", "boost"],
-  building: ["tech", "civic", "district", "tier", "py", "maint"],
-  district: ["tech", "civic"],
-  unit: ["tech", "civic", "cs", "rc", "mv", "mt", "pc", "res", "py", "up"],
-  project: ["tech", "civic"],
-  policy: ["tech", "civic", "slot"],
-  government: ["tier", "slots"],
-  belief: ["cls", "adopt"],
-  improvement: ["tech", "civic"],
-  resource: ["tech", "civic"],
-  promotion: ["cls", "lvl", "col", "req"],
-  governor: [],
-  governor_promotion: ["lvl", "col", "req", "gov"],
+  technology: ["req", "boost", "treeRow", "depth", "children", "unlocks", "eff"],
+  civic: ["req", "boost", "treeRow", "depth", "children", "unlocks", "eff"],
+  building: ["tech", "civic", "district", "tier", "py", "maint", "replaces", "eff"],
+  district: ["tech", "civic", "replaces", "buildings", "eff"],
+  unit: ["tech", "civic", "cs", "rc", "mv", "mt", "pc", "res", "resq", "resm", "py", "up", "replaces", "replacedBy", "eff"],
+  project: ["tech", "civic", "district", "eff"],
+  policy: ["tech", "civic", "slot", "eff"],
+  government: ["tier", "slots", "civic", "eff"],
+  belief: ["cls", "adopt", "eff"],
+  improvement: ["tech", "civic", "eff"],
+  resource: ["tech", "civic", "eff"],
+  terrain: ["mv", "def", "appeal", "eff"],
+  feature: ["nw", "mv", "def", "appeal", "eff"],
+  promotion: ["cls", "lvl", "col", "req", "eff"],
+  governor: ["eff"],
+  governor_promotion: ["lvl", "col", "req", "gov", "eff"],
 };
 
 /** Raw table columns an instance kind needs beyond pk/name/era/cost/prereq. */
@@ -3360,12 +3376,67 @@ const INSTANCE_EXTRA_COLUMNS = {
   belief: ["BeliefClassType", "AdoptionOrder"],
   promotion: ["PromotionClass", "Level", "Column"],
   governor_promotion: ["Level", "Column"],
+  technology: ["UITreeRow"],
+  civic: ["UITreeRow"],
+  terrain: ["MovementCost", "DefenseModifier", "Appeal"],
+  feature: ["NaturalWonder", "MovementChange", "DefenseModifier", "Appeal"],
 };
+
+/** Column legend for codes that need a sentence beyond `meta.encoding`. */
+const INSTANCE_LEGEND = {
+  technology: {
+    treeRow: "游戏内科技树纵坐标（同一行=同层替代线）",
+    depth: "从无前置节点起算的树深",
+    children: "后继科技句柄数组（前置边反向）",
+    unlocks: "该科技解锁的句柄数组（单位/建筑/区域/项目/改良/资源）",
+  },
+  civic: {
+    treeRow: "游戏内市政树纵坐标（同一行=同层替代线）",
+    depth: "从无前置节点起算的树深",
+    children: "后继市政句柄数组",
+    unlocks: "该市政解锁的句柄数组（政策/政体/单位/建筑/区域/改良等）",
+  },
+  unit: {
+    resq: "战略资源需求量（Units_XP2.ResourceCost）",
+    resm: "每回合资源维护量",
+    replaces: "该单位替代的基础单位（独特单位才有）",
+    replacedBy: "被哪些独特单位替代（关系表，不看 id 前缀）",
+  },
+  district: {
+    replaces: "该区域替代的基础区域（独特区域才有，继承其建筑）",
+    buildings: "可建建筑句柄数组（含被替代区域的基础建筑链；独特建筑按自身 replaces 列区分）",
+  },
+  building: { replaces: "该建筑替代的基础建筑（独特建筑才有）" },
+  government: { civic: "解锁该政体的市政", eff: "固有加成 + 积累加成（官方文本）" },
+  terrain: { mv: "移动力消耗", def: "防御加成", appeal: "魅力" },
+  feature: { nw: "是否自然奇观", mv: "移动力消耗变化", def: "防御加成", appeal: "魅力" },
+};
+
+/** Text kinds whose official description is the authoritative line. */
+const EFF_DESCRIPTION_ONLY = new Set(["unit"]);
+/** Kinds that keep every resolved effect-card line (adjacency/yield/trade included). */
+const EFF_ALL_LINES = new Set([
+  "district",
+  "improvement",
+  "building",
+  "project",
+  "policy",
+  "government",
+  "belief",
+  "promotion",
+  "governor",
+  "governor_promotion",
+  "technology",
+  "civic",
+  "resource",
+  "terrain",
+  "feature",
+]);
 
 const INSTANCE_OMITTED = [
   { what: "时代得分 / 黄金时代与决议", reason: "规则库无对应表（数据层未收录），不要给数值" },
   { what: "伟人个体名单与抢人顺序", reason: "个体伟人不在库内；只给伟人职业与基础成本" },
-  { what: "自然奇观", reason: "规则库无独立表；地形/地貌可用 civi6_entity type=terrain|feature 取原始行" },
+  { what: "自然奇观的独立清单", reason: "规则库无独立表；地形/地貌/自然奇观特征在 tiles 类（kind=terrain|feature），奇观本体不单列" },
   { what: "巨作清单", reason: "由巨作槽与伟人产出间接决定，不在库内" },
   {
     what: "未进 cityStates 的城邦宗主加成",
@@ -3376,16 +3447,26 @@ const INSTANCE_OMITTED = [
 
 /**
  * Field-level honesty channel: what the rows deliberately do NOT carry. With no
- * SQL tool, this list is the only way the model can tell "the packet is short
- * here" from "the data does not exist" — leaving it out invites memory-filling.
+ * SQL tool and no drill-down tool, this list is the only way the model can tell
+ * "the packet is short here" from "the data does not exist" — leaving it out
+ * invites memory-filling.
  */
 const INSTANCE_GAPS = [
   { what: "单位升级金币价 / 信仰买价", reason: "只有 PurchaseYield（允许的币种）；价格公式不在规则库" },
   { what: "建筑购买价", reason: "同上：只有 PurchaseYield，没有价格" },
   { what: "政策槽数量", reason: "行内 slot 是槽位类别；数量随政体/科技变化，见 government.slots" },
   { what: "科技/市政 OR 型前置", reason: "req 是 TechnologyPrereqs / CivicPrereqs 的 AND 列表；RequirementSets 的 OR 组未展开" },
-  { what: "每行 fx 超过 3 条的部分", reason: "fx 最多 3 条公式摘要；官方逐字全文与完整修饰符链用 civi6_entity(句柄)" },
-  { what: "光环/叠加上限等隐藏机制", reason: "包内只有官方 effects 文本；是否作用于自身、能否叠加要按修饰符与要求集判定，用 civi6_entity(句柄, modifiers='full')" },
+  { what: "每行 fx 超过 3 条的部分", reason: "fx 最多 3 条已解析公式摘要；更多口径见 eval，或按 unres 计数回答“数据层未解析”" },
+  {
+    what: "原始修饰符链 / unresolved 审计数据",
+    reason: "包内只给已解析效果（eff/fx）与未解析条数（unres）；修饰符链属审计层，模型面不可达，不要凭记忆补写",
+  },
+  {
+    what: "单位的通用能力清单",
+    reason:
+      "单位 ability 行由 TypeTags 标签闭包生成（含跨文明条件条目），不是该单位的能力归属；单位自身能力写在 unit 的 eff 描述里，其余按“数据层未解析”处理",
+  },
+  { what: "光环/叠加上限等隐藏机制", reason: "包内只有官方文本与公式；是否作用于自身、能否叠加不在数据层结论里，遇到时答“数据层未解析”" },
   { what: "总督就任/调任的成本与忠诚度机制", reason: "库里只有总督与晋升本身；机制数值不在规则库" },
 ];
 
@@ -3400,23 +3481,159 @@ function tableColumnsOf(ctx, table) {
 }
 
 /**
- * Sections exist because the transport cuts a single tool result at ~50k chars:
- * the full packet is ~110k, so it must arrive as a checklist of bounded pages
- * the model can request in one parallel step. A section that exceeds its budget
- * fails loudly here instead of being silently truncated by the harness.
+ * Classes (= one section per decision surface) exist because the transport cuts a
+ * single tool result at ~50k chars. The split is by purpose, not by row width:
+ * the model fetches `core` once, then only the classes the question touches, and
+ * each class says in `definition` what it is and in `whenToUse` when to ask for
+ * it. A class that exceeds its budget fails loudly instead of being truncated.
  *
- * The split is by row width, not by theme: after inlining unlock/prereq/stats,
- * unit+building alone are ~38KB, so the previous 4-way split no longer fits.
+ * `whenToUse` appears twice (manifest + class payload) on purpose: the manifest
+ * is the only selection surface available after fetching `core`, while the class
+ * payload is read after the fetch. Both come from this single constant.
  */
-const INSTANCE_SECTIONS = {
-  core: [],
-  "content-a": ["unit", "district", "project"],
-  "content-b": ["building", "improvement", "resource", "government"],
-  "content-c": ["technology", "civic", "policy", "belief"],
-  "content-d": ["promotion", "governor", "governor_promotion"],
-};
+const INSTANCE_CLASSES = [
+  {
+    section: "core",
+    kinds: [],
+    definition:
+      "实例骨架：硬约束（文明/领袖/速度/难度）、速度档、时代表、胜利线口径、文明套件全文、中立索引（产出→句柄）、城邦、GlobalParameters 子集、伟人职业与基础成本、单位行动，以及 gaps/omitted 两张缺口清单与各类清单。不含任何可选项的完整行（那些在各内容类）。",
+    whenToUse:
+      "每次新实例的第一步：先取它，再按 manifest 的 whenToUse 决定还要哪些类。换文明/领袖/速度才重取；换胜利线不必重取。",
+  },
+  {
+    section: "tech-tree",
+    kinds: ["technology"],
+    definition:
+      "科技树结构：每个科技是节点，行含时代、成本、树位(treeRow)、树深(depth)、AND 前置(req)、后继(children)、解锁句柄(unlocks)、尤里卡(boost)、官方描述(eff)。不含 OR 型前置与政策/政体以外的解锁来源。",
+    whenToUse:
+      "要在某个时代规划科技路线、判断“这条线值不值得绕”、看某科技解锁了什么、算前置闭包时取；配 eval 的 gates 用。",
+  },
+  {
+    section: "civic-tree",
+    kinds: ["civic"],
+    definition:
+      "市政树结构：每个市政是节点，行含时代、成本、树位(treeRow)、树深(depth)、前置(req)、后继(children)、解锁句柄(unlocks，含政策与政体)、鼓舞(boost)、官方描述(eff)。政府解锁在 unlocks 里指向 multipliers 的政体行。",
+    whenToUse:
+      "要规划市政顺序、抢政体/政策槽、判断“先点哪个市政”时取；与 tech-tree 常成对取。",
+  },
+  {
+    section: "units",
+    kinds: ["unit"],
+    definition:
+      "单位：成本、战斗力(cs)、远程(rc)、移动(mv)、维护(mt)、晋升类(pc)、战略资源(res/resq/resm)、购买币种(py)、升级目标(up)、独特单位替代关系(replaces/replacedBy)、官方描述(eff)。不含晋升树（见 promotions）与升级金币价（见 gaps）。",
+    whenToUse:
+      "决定出什么兵、比较单位强弱、判断某独特单位是否替代了基础单位、算兵种升级链时取。",
+  },
+  {
+    section: "districts",
+    kinds: ["district"],
+    definition:
+      "区域：解锁科技/市政、替代关系(replaces)、可建建筑句柄(buildings)、官方描述与相邻加成文本(eff)。不含建筑本身的行（见 buildings）。",
+    whenToUse:
+      "要决定铺什么区域、判断相邻加成怎么叠、看某独特区域替代谁、确认区域里能造哪些建筑时取。",
+  },
+  {
+    section: "buildings",
+    kinds: ["building", "project"],
+    definition:
+      "城市可造物：建筑（成本、解锁、所属区域、政体等级要求、购买币种、维护、替代关系、全文）与项目（成本、解锁、所属区域、全文）。不含区域本身（见 districts）与购买价（见 gaps）。",
+    whenToUse:
+      "要决定城市里造什么、比较建筑造价与产出、看项目（含太空项目）的前置与成本时取；常与 districts 连用。",
+  },
+  {
+    section: "tiles",
+    kinds: ["improvement", "resource", "terrain", "feature"],
+    definition:
+      "地块层：改良（解锁、产出、相邻加成、全文）、资源（类别、产出行）、地形（移动/防御/魅力）、地貌（含自然奇观标记）。不含区域与建筑的行。注意：地形/地貌的 name 取自本地化表，可能被场景文本覆盖成别名（已知草地显示为“荒漠”），判断地形请以 id 字段为准。",
+    whenToUse:
+      "要规划改良、判断资源值不值得占、看地形/地貌与自然奇观条件时取；与 districts 的相邻加成配合使用。",
+  },
+  {
+    section: "multipliers",
+    kinds: ["policy", "government"],
+    definition:
+      "互斥加法：政策（槽位类别 slot、解锁科技/市政、全文）与政体（等级 tier、槽位数 slots、解锁市政、固有加成+积累加成全文）。不含信条（见 beliefs）与总督（见 governors）。",
+    whenToUse:
+      "要选政策卡、换政体、比较两个政体的加成、判断政体解锁时点（来自 civic-tree）时取。",
+  },
+  {
+    section: "beliefs",
+    kinds: ["belief"],
+    definition:
+      "信条：59 条万神殿/创始人/追随者/强化信条，含类别(cls)、采纳顺序(adopt)、官方全文(eff)。不含宗教压力与传教强度数值（见 core.params 的 RELIGION_*）。",
+    whenToUse:
+      "要选万神殿或追随者、问某信条的实际加成、比较两条互斥信条时取；与 multipliers 连用。",
+  },
+  {
+    section: "promotions",
+    kinds: ["promotion"],
+    definition:
+      "单位晋升：144 条晋升，含晋升类(cls)、等级(lvl)、列(col)、前置晋升(req)、官方全文(eff)。不含单位本身（见 units）与晋升类通用能力清单（见 gaps）。",
+    whenToUse:
+      "要规划某个兵种树的晋升顺序、看晋升前置、比较同级晋升时取；与 units 的 pc 列配合。",
+  },
+  {
+    section: "governors",
+    kinds: ["governor", "governor_promotion"],
+    definition:
+      "总督：8 名总督与 49 条总督晋升，含等级(lvl)、列(col)、前置(req)、权威归属(gov，来自 GovernorPromotionSets)、官方全文(eff)。归属只认 gov 列，不看 id 前缀。",
+    whenToUse:
+      "要决定派谁去哪座城、点哪条晋升、确认某晋升属于哪个总督（BBG 会改挂）时取。",
+  },
+];
 const INSTANCE_SECTION_BUDGET = 44000;
-const DESC_KINDS = new Set(["policy", "government", "belief", "promotion", "improvement", "resource", "governor", "governor_promotion"]);
+const INSTANCE_CLASS_BY_SECTION = new Map(INSTANCE_CLASSES.map((entry) => [entry.section, entry]));
+
+/**
+ * Some LocalizedText rows are aliases ("{LOC_OTHER_TAG}") rather than sentences,
+ * which leaked braces into names and city-state bonuses. Resolve up to four
+ * levels of `{LOC_*}` references against the same language index.
+ */
+const INLINE_LOC_REF = /\{([A-Z][A-Z0-9_]*)\}/g;
+
+function resolveLocalizedRefs(ctx, text, lang = "zh_Hans_CN") {
+  if (typeof text !== "string" || !text.includes("{")) return text;
+  let out = text;
+  for (let pass = 0; pass < 4; pass++) {
+    const refs = [...new Set([...out.matchAll(INLINE_LOC_REF)].map((m) => m[1]))].filter((tag) => tag.startsWith("LOC_"));
+    if (!refs.length) break;
+    const lookup = localizeMany(ctx, refs, lang);
+    let changed = false;
+    out = out.replace(INLINE_LOC_REF, (match, tag) => {
+      const value = lookup(tag);
+      if (!value || value === tag) return match;
+      changed = true;
+      return value;
+    });
+    if (!changed) break;
+  }
+  return out;
+}
+
+/** Strip Civ6 inline markup from raw localized text ([ICON_*], [NEWLINE], [COLOR*]). */
+function scrubGameMarkup(text) {
+  if (typeof text !== "string" || !text) return text;
+  return text
+    .replace(/\[NEWLINE\]/gi, " ")
+    .replace(/\[(?:ICON|COLOR|ENDCOLOR)[^\]]*\]/gi, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/**
+ * Mechanism rows, not effects: the formula layer renders "获得 X / 附加 X…" for
+ * modifiers that grant an ability or attach a modifier. They must never outrank a
+ * real formula in `fx`, and they are counted in `unres` so the model can say
+ * "数据层未解析" instead of quoting a tag.
+ */
+const MECHANISM_TEMPLATES = new Set(["grant_ability", "attach_modifier", "grant_entity"]);
+
+function isPlaceholderFormula(desc, template) {
+  const text = String(desc ?? "").trim();
+  if (!text || text === "获得能力") return true;
+  if (text.startsWith("获得") || text.endsWith("…")) return true;
+  return MECHANISM_TEMPLATES.has(String(template ?? ""));
+}
 
 function buildInstanceData(ctx, args) {
   if (!hasTable(ctx, "kb_formula") || !hasTable(ctx, "kb_formula_owner")) {
@@ -3462,13 +3679,17 @@ function buildInstanceData(ctx, args) {
   const pushKit = (kind, id, why) => {
     if (!kind || !id) return;
     const card = briefEvidenceCard(ctx, kind, id);
-    const effects = card ? parseJsonArray(card.effects_json).map((e) => e.text_zh ?? e.text_en).filter(Boolean) : [];
+    const effects = card
+      ? [...new Set(parseJsonArray(card.effects_json).map((e) => e.text_zh ?? e.text_en).filter(Boolean))]
+      : [];
     civKit.push({
       kind,
       id,
       name_zh: entityLabel(ctx, kind, id),
       why,
-      effects: effects.slice(0, 3),
+      // The whole civ kit is ~2KB of text; the old 3-line cap was what forced a
+      // per-trait drill-down call for every "what exactly does my civ do".
+      effects,
       dataGap: effects.length === 0,
     });
   };
@@ -3485,8 +3706,8 @@ function buildInstanceData(ctx, args) {
   // --- formulas grouped by owner (the executable side) ---------------------
   const formulaRows = q(
     ctx,
-    `SELECT o.owner_kind AS k, o.owner_id AS id, f.desc AS d, f.dimension AS dim,
-            f.value AS v, f.confidence AS c
+    `SELECT o.owner_kind AS k, o.owner_id AS id, f.desc AS d, f.template AS t,
+            f.dimension AS dim, f.value AS v, f.confidence AS c
        FROM kb_formula_owner o JOIN kb_formula f ON f.modifier_id = o.modifier_id;`,
   );
   const formulasByOwner = new Map();
@@ -3514,17 +3735,37 @@ function buildInstanceData(ctx, args) {
     const list = formulasByOwner.get(`${item.kind}:${item.id}`) ?? [];
     item.fx = list
       .slice()
+      .filter((r) => !isPlaceholderFormula(r.d, r.t))
       .sort((a, b) => (Number(b.c) || 0) - (Number(a.c) || 0))
       .slice(0, 3)
       .map((r) => r.d)
       .join(";");
   }
 
-  // The civ kit keeps the first three effect lines on purpose: effect cards for
-  // a unique unit also list modifiers that only apply conditionally (another
-  // civ's suzerain/great-person bonuses), and shipping the full list as if it
-  // were innate is worse than shipping less. Hidden stacking questions are the
-  // `gaps` entry pointing at civi6_entity(modifiers:'full').
+  // --- authoritative text per row (`eff`) and unparsed-mechanism counts ------
+  // The effect card is the only place the official sentence lives. It used to be
+  // truncated to 32 chars (column `d`), which is what made a per-entity
+  // drill-down unavoidable for beliefs / policies / governments.
+  const effByOwner = new Map();
+  if (hasTable(ctx, "effect_cards")) {
+    for (const r of q(ctx, "SELECT card_id, effects_json FROM effect_cards;")) {
+      const cardId = String(r.card_id ?? "");
+      if (!cardId) continue;
+      const colon = cardId.indexOf(":");
+      const kind = colon > 0 ? cardId.slice(0, colon) : "";
+      if (!EFF_DESCRIPTION_ONLY.has(kind) && !EFF_ALL_LINES.has(kind)) continue;
+      const lines = [];
+      for (const e of parseJsonArray(r.effects_json)) {
+        const text = String(e.text_zh ?? e.text_en ?? "").replace(/\s+/g, " ").trim();
+        if (!text) continue;
+        // Unit cards list tag-closure abilities from *other* civilizations; only
+        // the unit's own description is authoritative for it.
+        if (EFF_DESCRIPTION_ONLY.has(kind) && String(e.kind ?? "") !== "description") continue;
+        lines.push(text);
+      }
+      if (lines.length) effByOwner.set(cardId, [...new Set(lines)]);
+    }
+  }
 
   // --- inline maps: the joins this packet used to expose as a handle graph --
   const pushInto = (map, key, value) => {
@@ -3564,7 +3805,7 @@ function buildInstanceData(ctx, args) {
     const boostLookup = boostTags.length ? localizeMany(ctx, boostTags, "zh_Hans_CN") : () => undefined;
     for (const r of boostRows) {
       const id = r.TechnologyType ?? r.CivicType;
-      const text = boostLookup(String(r.TriggerDescription ?? "")) ?? r.TriggerDescription;
+      const text = scrubGameMarkup(resolveLocalizedRefs(ctx, String(boostLookup(String(r.TriggerDescription ?? "")) ?? ""))) || r.TriggerDescription;
       if (id && text) boostsById.set(String(id), String(text));
     }
   }
@@ -3592,6 +3833,61 @@ function buildInstanceData(ctx, args) {
       .map((r) => String(r.GovernorPromotionType ?? ""))
       .filter(Boolean);
     if (promotionIds.length) governorOwners = governorOwnersOf(ctx, promotionIds);
+  }
+
+  // --- unique-unit / district / building replacement relations -------------
+  // "甲胄替代骑士" is a relation, not an id prefix; without it the upgrade chain
+  // reads as if the unit simply upgrades into a base unit.
+  const REPLACE_TABLES = [
+    ["UnitReplaces", "CivUniqueUnitType", "ReplacesUnitType"],
+    ["DistrictReplaces", "CivUniqueDistrictType", "ReplacesDistrictType"],
+    ["BuildingReplaces", "CivUniqueBuildingType", "ReplacesBuildingType"],
+  ];
+  const replacesOf = new Map();
+  const replacedByOf = new Map();
+  for (const [table, uniqueCol, baseCol] of REPLACE_TABLES) {
+    if (!hasTable(ctx, table)) continue;
+    for (const r of q(ctx, `SELECT "${uniqueCol}" AS u, "${baseCol}" AS b FROM "${table}";`)) {
+      if (!r.u || !r.b) continue;
+      pushInto(replacesOf, String(r.u), String(r.b));
+      pushInto(replacedByOf, String(r.b), String(r.u));
+    }
+  }
+  const unitResourceFacts = new Map();
+  if (hasTable(ctx, "Units_XP2")) {
+    for (const r of q(ctx, "SELECT UnitType, ResourceCost, ResourceMaintenanceAmount FROM Units_XP2;")) {
+      if (r.UnitType) unitResourceFacts.set(String(r.UnitType), r);
+    }
+  }
+
+  // --- tree unlocks: invert PrereqTech / PrereqCivic into node -> content ---
+  const UNLOCK_SOURCES = [
+    ["unit", "Units", "UnitType"],
+    ["building", "Buildings", "BuildingType"],
+    ["district", "Districts", "DistrictType"],
+    ["project", "Projects", "ProjectType"],
+    ["improvement", "Improvements", "ImprovementType"],
+    ["resource", "Resources", "ResourceType"],
+    ["policy", "Policies", "PolicyType"],
+    ["government", "Governments", "GovernmentType"],
+  ];
+  const unlockEdges = new Map();
+  for (const [kind, table, pk] of UNLOCK_SOURCES) {
+    if (!hasTable(ctx, table)) continue;
+    const cols = tableColumnsOf(ctx, table);
+    const treeCols = [];
+    if (cols.has("PrereqTech")) treeCols.push(["technology", "PrereqTech"]);
+    if (cols.has("PrereqCivic")) treeCols.push(["civic", "PrereqCivic"]);
+    if (!treeCols.length) continue;
+    const select = [...new Set([pk, ...treeCols.map(([, col]) => col)])];
+    for (const r of q(ctx, `SELECT ${select.map((c) => `"${c}"`).join(", ")} FROM "${table}";`)) {
+      const id = String(r[pk] ?? "");
+      if (!id) continue;
+      for (const [tree, col] of treeCols) {
+        const node = String(r[col] ?? "");
+        if (node) pushInto(unlockEdges, `${tree}:${node}`, `${kind}:${id}`);
+      }
+    }
   }
 
   // --- content: every choosable entity, rows already join'd ----------------
@@ -3635,8 +3931,14 @@ function buildInstanceData(ctx, args) {
       }
       const eraIdx = era && eraIndexByType.has(era) ? eraIndexByType.get(era) : null;
       const list = formulasByOwner.get(`${spec.kind}:${id}`) ?? [];
+      const realFormulas = [];
+      let unparsedFormulas = 0;
+      for (const item of list) {
+        if (isPlaceholderFormula(item.d, item.t)) unparsedFormulas += 1;
+        else realFormulas.push(item);
+      }
       const fx = [...new Set(
-        list
+        realFormulas
           .slice()
           .sort((a, b) => (Number(b.c) || 0) - (Number(a.c) || 0))
           .map((r) => r.d)
@@ -3644,7 +3946,14 @@ function buildInstanceData(ctx, args) {
       )]
         .slice(0, 3)
         .join(";");
+      const cardKey = `${spec.kind}:${id}`;
+      // `unres` only counts mechanism rows that had no real description and were
+      // therefore dropped from `fx`; it never invalidates an `eff` sentence.
+      const unres = unparsedFormulas;
+      const eff = effByOwner.get(cardKey) ?? null;
       const raw = (col) => (col && cols.has(col) ? row[col] ?? null : null);
+      const replaces = replacesOf.get(id) ?? null;
+      const resourceRow = unitResourceFacts.get(id);
       const fieldValue = (field) => {
         switch (field) {
           case "req":
@@ -3668,13 +3977,21 @@ function buildInstanceData(ctx, args) {
           case "rc":
             return raw("RangedCombat");
           case "mv":
-            return raw("BaseMoves");
+            return raw("BaseMoves") ?? raw("MovementCost") ?? raw("MovementChange");
           case "mt":
             return raw("Maintenance");
           case "pc":
             return raw("PromotionClass");
           case "res":
             return raw("StrategicResource");
+          case "resq":
+            return resourceRow?.ResourceCost ?? null;
+          case "resm":
+            return resourceRow?.ResourceMaintenanceAmount ?? null;
+          case "replaces":
+            return replaces;
+          case "replacedBy":
+            return replacedByOf.get(id) ?? null;
           case "slot":
             return raw("GovernmentSlotType");
           case "cls":
@@ -3689,31 +4006,133 @@ function buildInstanceData(ctx, args) {
             return governmentSlots.get(id) ?? null;
           case "up":
             return upgradesTo.get(id) ?? null;
+          case "def":
+            return raw("DefenseModifier");
+          case "appeal":
+            return raw("Appeal");
+          case "nw":
+            return raw("NaturalWonder");
+          case "treeRow":
+            return raw("UITreeRow");
           case "gov": {
             const owners = governorOwners.get(id) ?? [];
             return owners.length ? owners.map((entry) => entry.id) : null;
           }
+          case "eff":
+            return eff;
+          // Filled in the tree post-pass, which needs every handle first.
+          case "children":
+          case "unlocks":
+          case "buildings":
+            return null;
+          case "depth":
+            return null;
           default:
             return null;
         }
       };
-      const rowOut = [handle, id, nameTag, eraIdx, row[spec.cost] ?? null, fx];
+      const rowOut = [handle, id, nameTag, eraIdx, row[spec.cost] ?? null, fx, unres];
       for (const field of fields) rowOut.push(fieldValue(field));
       out.push(rowOut);
       kindRows.set(`${spec.kind}:${id}`, { id, era, row: rowOut });
     });
-    content[spec.kind] = { columns: ["h", "id", "name", "era", "cost", "fx", ...fields], rows: out };
+    content[spec.kind] = { columns: ["h", "id", "name", "era", "cost", "fx", "unres", ...fields], rows: out };
     counts[spec.kind] = out.length;
   }
 
   // --- district -> buildings index ----------------------------------------
   const buildingsByDistrict = {};
+  const buildingsByDistrictReplaced = {};
   if (hasTable(ctx, "Buildings")) {
     for (const r of q(ctx, `SELECT BuildingType, PrereqDistrict FROM Buildings WHERE PrereqDistrict IS NOT NULL;`)) {
       const d = handles.get(`district:${r.PrereqDistrict}`);
       const b = handles.get(`building:${r.BuildingType}`);
       if (!d || !b) continue;
       (buildingsByDistrict[d] ??= []).push(b);
+    }
+  }
+
+  // --- tree structure post-pass (needs every handle in place) --------------
+  const treeStats = {};
+  for (const tree of ["technology", "civic"]) {
+    const nodeSection = content[tree];
+    if (!nodeSection) continue;
+    const at = (name) => nodeSection.columns.indexOf(name);
+    const idAt = at("id");
+    const reqAt = at("req");
+    const childrenAt = at("children");
+    const depthAt = at("depth");
+    const unlocksAt = at("unlocks");
+    const byId = new Map(nodeSection.rows.map((row) => [row[idAt], row]));
+    const children = new Map();
+    let edges = 0;
+    for (const row of nodeSection.rows) {
+      const parents = Array.isArray(row[reqAt]) ? row[reqAt] : [];
+      for (const parent of parents) {
+        if (!byId.has(parent)) continue;
+        pushInto(children, parent, row[idAt]);
+        edges += 1;
+      }
+    }
+    for (const [parent, kids] of children) {
+      const row = byId.get(parent);
+      if (row && childrenAt >= 0) row[childrenAt] = kids;
+    }
+    // depth = longest path from a root; the stack guard keeps a data cycle from
+    // hanging the build (the tree is a DAG in the shipped rulesets).
+    const depth = new Map();
+    const visit = (nodeId, stack) => {
+      if (depth.has(nodeId)) return depth.get(nodeId);
+      if (stack.has(nodeId) || stack.size > 40) return 0;
+      const row = byId.get(nodeId);
+      if (!row) return 0;
+      stack.add(nodeId);
+      const parents = (Array.isArray(row[reqAt]) ? row[reqAt] : []).filter((p) => byId.has(p));
+      const value = parents.length ? 1 + Math.max(...parents.map((p) => visit(p, stack))) : 0;
+      stack.delete(nodeId);
+      depth.set(nodeId, value);
+      return value;
+    };
+    let maxDepth = 0;
+    for (const row of nodeSection.rows) {
+      const value = visit(row[idAt], new Set());
+      if (depthAt >= 0) row[depthAt] = value;
+      maxDepth = Math.max(maxDepth, value);
+    }
+    if (unlocksAt >= 0) {
+      for (const row of nodeSection.rows) {
+        const targets = unlockEdges.get(`${tree}:${row[idAt]}`) ?? [];
+        const list = [];
+        for (const key of targets) {
+          const handle = handles.get(key);
+          if (handle) list.push(handle);
+        }
+        row[unlocksAt] = list.length ? list : null;
+      }
+    }
+    treeStats[tree] = { nodes: nodeSection.rows.length, edges, maxDepth };
+  }
+
+  // --- district -> building handles (unique districts inherit the chain) ---
+  if (content.district) {
+    const section = content.district;
+    const at = (name) => section.columns.indexOf(name);
+    const idAt = at("id");
+    const replacesAt = at("replaces");
+    const buildingsAt = at("buildings");
+    for (const row of section.rows) {
+      if (buildingsAt < 0) break;
+      const own = buildingsByDistrict[row[0]] ?? [];
+      const replacedDistricts = Array.isArray(row[replacesAt]) ? row[replacesAt] : [];
+      const inherited = [];
+      for (const base of replacedDistricts) {
+        const baseHandle = handles.get(`district:${base}`);
+        if (!baseHandle) continue;
+        buildingsByDistrictReplaced[baseHandle] = true;
+        inherited.push(...(buildingsByDistrict[baseHandle] ?? []));
+      }
+      const all = [...new Set([...own, ...inherited])];
+      row[buildingsAt] = all.length ? all : null;
     }
   }
 
@@ -3733,40 +4152,16 @@ function buildInstanceData(ctx, args) {
     if (picked.length) byDimension[dim] = picked;
   }
 
-  // --- short descriptions where the formula layer has no sentence ----------
-  // These are exactly the rows models used to fetch with SQL (belief/policy/
-  // government/promotion text); the `d` column is only filled when `fx` is empty.
-  const descById = new Map();
-  if (hasTable(ctx, "effect_cards")) {
-    for (const kind of DESC_KINDS) {
-      for (const r of q(
-        ctx,
-        `SELECT owner_id, description_zh FROM effect_cards WHERE owner_kind = ? AND description_zh IS NOT NULL;`,
-        kind,
-      )) {
-        const text = String(r.description_zh).replace(/\s+/g, " ").trim();
-        if (text) descById.set(`${kind}:${r.owner_id}`, text.length > 32 ? `${text.slice(0, 31)}…` : text);
-      }
-    }
-  }
-
-  // Resolve LOC names in one batched pass.
+  // Resolve LOC names in one batched pass (plus alias tags, e.g. terrain names
+  // whose localization is "{LOC_SOMETHING_ELSE}").
   if (tags.length) {
     const lookup = localizeMany(ctx, tags, "zh_Hans_CN");
     for (const section of Object.values(content)) {
       for (const row of section.rows) {
         if (typeof row[2] === "string" && row[2].startsWith("LOC_")) {
-          row[2] = lookup(row[2]) ?? row[2];
+          row[2] = resolveLocalizedRefs(ctx, lookup(row[2]) ?? row[2]);
         }
       }
-    }
-  }
-
-  for (const [kind, section] of Object.entries(content)) {
-    if (!DESC_KINDS.has(kind)) continue;
-    section.columns = [...section.columns, "d"];
-    for (const row of section.rows) {
-      row.push(row[5] ? null : (descById.get(`${kind}:${row[1]}`) ?? null));
     }
   }
 
@@ -3823,18 +4218,24 @@ function buildInstanceData(ctx, args) {
     .flatMap((r) => [r.name, r.bonus])
     .filter((t) => typeof t === "string" && t.startsWith("LOC_"));
   const cityStateLookup = cityStateTags.length ? localizeMany(ctx, cityStateTags, "zh_Hans_CN") : () => undefined;
-  const cityStates = cityStateList.map((r) => [
-    r.id,
-    cityStateLookup(String(r.name ?? "")) ?? String(r.name ?? ""),
-    String(r.category ?? ""),
-    cityStateLookup(String(r.bonus ?? "")) ?? (r.bonus ? String(r.bonus) : null),
-  ]);
+  const cityStates = cityStateList.map((r) => {
+    const name = cityStateLookup(String(r.name ?? "")) ?? String(r.name ?? "");
+    const bonus = cityStateLookup(String(r.bonus ?? ""));
+    return [
+      r.id,
+      scrubGameMarkup(resolveLocalizedRefs(ctx, name)),
+      String(r.category ?? ""),
+      bonus ? scrubGameMarkup(resolveLocalizedRefs(ctx, bonus)) : r.bonus ? scrubGameMarkup(String(r.bonus)) : null,
+    ];
+  });
 
   // Sanity metric: how many edges are now carried inside rows, not as a graph.
   let inlineEdges = 0;
+  let effChars = 0;
+  let unresolvedRows = 0;
   for (const section of Object.values(content)) {
     const at = (name) => section.columns.indexOf(name);
-    for (const name of ["req", "tech", "civic"]) {
+    for (const name of ["req", "tech", "civic", "children", "unlocks"]) {
       const index = at(name);
       if (index < 0) continue;
       for (const row of section.rows) {
@@ -3843,28 +4244,37 @@ function buildInstanceData(ctx, args) {
         else if (value) inlineEdges += 1;
       }
     }
+    const effAt = at("eff");
+    const unresAt = at("unres");
+    for (const row of section.rows) {
+      if (effAt >= 0 && Array.isArray(row[effAt])) {
+        for (const line of row[effAt]) effChars += String(line).length;
+      }
+      if (unresAt >= 0 && Number(row[unresAt]) > 0) unresolvedRows += 1;
+    }
   }
 
   return {
     meta: {
       ruleset: source,
       builtAt: build.builtAt ?? effectsMeta.builtAt ?? null,
-      packetVersion: 2,
+      packetVersion: 3,
       encoding: {
-        h: "句柄（t=科技 c=市政 b=建筑 d=区域 u=单位 p=政策 g=政体 bl=信条 i=改良 r=资源 pr=项目 pm=晋升 gv=总督 gp=总督晋升；数字为同类行号），可直接传给 civi6_entity",
-        row: "行 = [h, id, name, era, cost, fx, ...content[kind].columns 第 6 位起]；各 kind 字段不同，按 columns 取，不要按位置猜",
+        h: "句柄（t=科技 c=市政 b=建筑 d=区域 u=单位 p=政策 g=政体 bl=信条 i=改良 r=资源 te=地形 fe=地貌 pr=项目 pm=晋升 gv=总督 gp=总督晋升；数字为同类行号）。句柄只用于包内交叉索引（indexes / children / unlocks / buildings），不是取数入口",
+        row: "行 = [h, id, name, era, cost, fx, unres, ...content[kind].columns 第 7 位起]；各 kind 字段不同，按 columns 取，不要按位置猜",
         name: "LOC 标签（由 name_zh 解析）或原名",
         era: "eras[] 下标（0 基）",
         cost: "该 kind 的主成本（科技=科技值，市政=文化值，其余=生产力）",
-        fx: "可执行公式摘要（kb_formula 渲染，最多 3 条）",
-        d: "fx 为空时的官方描述（≤32 字）",
+        fx: "已解析公式摘要（kb_formula 渲染，最多 3 条；占位行已滤掉）",
+        unres: "因没有真实描述而被 fx 丢弃的机制行数。要数值且 fx 为空时用它回答“数据层未解析”；有 eff 时照常引用文本，两者不互斥",
+        eff: "权威文本数组（effect_cards 已解析效果，官方描述/相邻加成/产出行等）",
         req: "前置 id 数组（科技/市政=前置科技/市政；晋升=前置晋升）",
         boost: "尤里卡/鼓舞触发文本",
         tech: "解锁科技 id（单位/建筑/区域/政策/项目/改良/资源）",
-        civic: "解锁市政 id",
+        civic: "解锁市政 id（含政体）",
         cs: "战斗力",
         rc: "远程战斗力",
-        mv: "移动力",
+        mv: "移动力（单位=BaseMoves，地形=移动消耗，地貌=移动变化）",
         mt: "维护费",
         pc: "晋升类",
         res: "战略资源",
@@ -3897,7 +4307,7 @@ function buildInstanceData(ctx, args) {
     },
     civKit,
     content,
-    indexes: { dimension: byDimension, buildingsByDistrict },
+    indexes: { dimension: byDimension },
     cityStates,
     omitted: INSTANCE_OMITTED,
     omittedNote: INSTANCE_OMITTED_NOTE,
@@ -3911,15 +4321,31 @@ function buildInstanceData(ctx, args) {
       rows: Object.values(counts).reduce((a, b) => a + b, 0),
       formulas: formulaRows.length,
       inlineEdges,
+      effChars,
+      unresolvedRows,
+      trees: treeStats,
     },
   };
 }
 
-/** Assemble one bounded page of the packet; oversize is an error, never a cut. */
+/**
+ * Assemble one bounded class page. `definition` says what the class is,
+ * `whenToUse` says when to ask for it — two attributes, not one blob, so the
+ * model can decide before fetching instead of inferring.
+ */
 function assembleInstanceSection(data, section) {
-  const sections = {};
-  sections.core = {
+  const entry = INSTANCE_CLASS_BY_SECTION.get(section);
+  if (!entry) {
+    throw new Error(
+      `civi6_instance: 未知数据类 "${section}"（可用：${INSTANCE_CLASSES.map((c) => c.section).join(" / ")}）`,
+    );
+  }
+  const pages = {};
+  const coreEntry = INSTANCE_CLASS_BY_SECTION.get("core");
+  pages.core = {
     section: "core",
+    definition: coreEntry.definition,
+    whenToUse: coreEntry.whenToUse,
     meta: data.meta,
     instance: data.instance,
     civKit: data.civKit,
@@ -3935,23 +4361,51 @@ function assembleInstanceSection(data, section) {
     gppBaseCost: data.gppBaseCost,
     operations: data.operations,
   };
-  for (const [name, kinds] of Object.entries(INSTANCE_SECTIONS)) {
+  for (const classEntry of INSTANCE_CLASSES) {
+    const { section: name, kinds } = classEntry;
     if (!kinds.length) continue;
     const content = {};
-    for (const kind of kinds) if (data.content[kind]) content[kind] = data.content[kind];
-    sections[name] = { section: name, content };
+    const legend = {};
+    for (const kind of kinds) {
+      if (!data.content[kind]) continue;
+      content[kind] = data.content[kind];
+      if (INSTANCE_LEGEND[kind]) legend[kind] = INSTANCE_LEGEND[kind];
+    }
+    pages[name] = {
+      section: name,
+      definition: classEntry.definition,
+      whenToUse: classEntry.whenToUse,
+      content,
+      ...(Object.keys(legend).length ? { legend } : {}),
+    };
   }
-  const sizes = {};
-  for (const [name, value] of Object.entries(sections)) sizes[name] = JSON.stringify(value).length;
-  sections.core.manifest = {
-    sections: sizes,
-    next: Object.keys(INSTANCE_SECTIONS).filter((name) => name !== "core"),
-    rows: data.integrity.rows,
-    note: "同一回合并行取 core + content-a + content-b + content-c + content-d；五片合起来才是完整包。换胜利线不重新取数。",
+  const measure = () => {
+    const sizes = {};
+    for (const [name, value] of Object.entries(pages)) sizes[name] = JSON.stringify(value).length;
+    return sizes;
   };
-  const picked = sections[section];
+  const buildManifest = (sizes) => ({
+    classes: INSTANCE_CLASSES.map((entry) => ({
+      section: entry.section,
+      whenToUse: entry.whenToUse,
+      rows: entry.kinds.reduce((n, kind) => n + (data.counts[kind] ?? 0), 0),
+      bytes: sizes[entry.section] ?? 0,
+    })),
+    rows: data.integrity.rows,
+    note:
+      "先取 core，再按各类 whenToUse 只取问题涉及的 2~5 类，不要一次全取；全量包比按需取更贵。" +
+      "换胜利线不重取，换文明/领袖/速度才重取。",
+  });
+  // core carries the manifest, so its own byte count is only correct after the
+  // manifest exists; a second pass settles the digits.
+  let sizes = measure();
+  for (let pass = 0; pass < 2; pass++) {
+    pages.core.manifest = buildManifest(sizes);
+    sizes = measure();
+  }
+  const picked = pages[section];
   if (!picked) {
-    throw new Error(`civi6_instance: 未知分片 "${section}"（可用：${Object.keys(sections).join(" / ")}）`);
+    throw new Error(`civi6_instance: 未知数据类 "${section}"（可用：${Object.keys(pages).join(" / ")}）`);
   }
   const text = JSON.stringify(picked);
   if (text.length > INSTANCE_SECTION_BUDGET) {
@@ -3959,9 +4413,9 @@ function assembleInstanceSection(data, section) {
       .map(([kind, value]) => [kind, JSON.stringify(value).length])
       .sort((a, b) => b[1] - a[1]);
     throw new Error(
-      `civi6_instance: 分片 "${section}" 序列化为 ${text.length} 字符，超过 ${INSTANCE_SECTION_BUDGET} 上限` +
+      `civi6_instance: 数据类 "${section}" 序列化为 ${text.length} 字符，超过 ${INSTANCE_SECTION_BUDGET} 上限` +
         `（最大块：${blocks.slice(0, 4).map(([kind, n]) => `${kind} ${n}`).join(" / ") || "core"}）。` +
-        "请把该分片再拆小，不要交给传输层截断。",
+        "请把该类再拆小，不要交给传输层截断。",
     );
   }
   return picked;
@@ -3982,7 +4436,7 @@ function instanceTool(getKb) {
   return makeTool({
     name: "civi6_instance",
     description:
-      "Objective-free instance packet, delivered as bounded sections because a single result cannot carry ~110KB. Call it ONCE per instance as ONE parallel step: section='core' + 'content-a' + 'content-b' + 'content-c' + 'content-d' — the five together are the full packet (core.manifest lists the sizes). Every row is already join'd: [h, id, name, era, cost, fx, ...content[kind].columns from index 6], so unlock (tech/civic), prerequisites (req), unit combat/moves/class/resource, policy slot, belief class, government tier/slots, promotion level/column are inline — read `columns`, never guess a position. There is no SQL tool: this packet plus civi6_eval plus civi6_entity(handle) is the whole data surface. Sections are: core = hard constraints + civ kit (official text + mechanic chain) + yield/district indexes + city-states + GlobalParameters subset + great-person classes + unit operations + gaps/omitted (the only 'this is missing' channel); content-a = unit, district, project; content-b = building, improvement, resource, government; content-c = technology, civic, policy, belief; content-d = promotion, governor, governor_promotion. Use civi6_eval for arithmetic, civi6_entity(handle) only for verbatim text or the full modifier chain. Changing victory line does NOT require a re-fetch. A section that would exceed its budget fails loudly instead of being truncated.",
+      "Objective-free instance packet, one data class per call. Fetch section='core' first: it carries the hard constraints (civ/leader/speed/difficulty), the civ kit full text, the neutral indexes, city-states, global parameters, and manifest.classes with each class's whenToUse/rows/bytes. Then fetch ONLY the 2-5 classes the question touches (tech-tree, civic-tree, units, districts, buildings, tiles, multipliers, beliefs, promotions, governors) — do not fetch all of them. Every class returns definition (what the class is and what it does NOT contain) and whenToUse (when to ask for it) as separate fields. Every row is already join'd: [h, id, name, era, cost, fx, unres, ...content[kind].columns from index 7]; eff is the authoritative official text, fx the parsed formula summary, unres the count of unparsed mechanism rows (when >0 answer '数据层未解析' and do not fill in). Read `columns`/`legend`, never guess a position. There is no SQL tool and no per-entity drill-down tool: this packet plus civi6_eval plus civi6_meta is the whole data surface. Changing victory line does NOT require a re-fetch; changing civ/leader/speed does. A class that would exceed its budget fails loudly instead of being truncated.",
     parameters: {
       type: "object",
       properties: {
@@ -3992,8 +4446,9 @@ function instanceTool(getKb) {
         difficulty: { type: "string", description: "Difficulty id (optional; listed in instance.difficulties)." },
         section: {
           type: "string",
-          enum: Object.keys(INSTANCE_SECTIONS),
-          description: "Which bounded page of the packet to return. Fetch all five in the same step.",
+          enum: INSTANCE_CLASSES.map((entry) => entry.section),
+          description:
+            "Data class to return. Start with 'core', then pick by manifest.classes[].whenToUse; each class also carries definition/whenToUse in its payload.",
         },
       },
       required: ["section"],
@@ -4030,10 +4485,12 @@ function kindOfEntityId(id) {
 }
 
 /**
- * Packet handles are 1-letter kind prefixes + the row's index in pk order.
- * `civi6_entity` accepts them so a row can be drilled without re-deriving its
- * id or dropping to raw tables. The id list MUST be built with the same sort
- * as buildInstanceData (pk localeCompare), otherwise handles point elsewhere.
+ * Packet handles are 1-2 letter kind prefixes + the row's index in pk order.
+ * They are the cross-reference key inside the packet (indexes / tree.children /
+ * tree.unlocks / district.buildings); `civi6_entity` used to accept them as a
+ * drill-down entry and is no longer registered. The id list MUST be built with
+ * the same sort as buildInstanceData (pk localeCompare), otherwise handles point
+ * elsewhere.
  */
 const HANDLE_KIND = {
   t: "technology",
@@ -4046,6 +4503,8 @@ const HANDLE_KIND = {
   bl: "belief",
   i: "improvement",
   r: "resource",
+  te: "terrain",
+  fe: "feature",
   pr: "project",
   pm: "promotion",
   gv: "governor",
@@ -4764,10 +5223,10 @@ function buildReasoningPrompt() {
   return `## Civ6 工作协议（一次取数，公式算账）
 “怎么玩 / 时代规划 / 取舍”类问题，数据只取一次，其余全靠公式与账本。
 
-1. 第 1 步（同一回合并行，五片合起来才是完整数据包）：civi6_instance({ civ, leader, speed, difficulty, section:'core' }) 与 section:'content-a' / 'content-b' / 'content-c' / 'content-d'。core.manifest 列出各片体积；它只由硬约束决定，包含文明套件全文、城邦、总督、中立索引、GlobalParameters 子集，以及 gaps/omitted 两张“这里没有”的清单。换胜利线不重新取数；换文明或速度才重新取。
-2. 每行已经连接好，按 content[kind].columns 读，不要按位置猜：解锁科技/市政（tech/civic）、科技与市政前置（req）、单位战斗力/移动/维护/晋升类/战略资源/升级目标（cs/rc/mv/mt/pc/res/up）、政策槽（slot）、信条类别（cls）、政体等级与槽位数（tier/slots）、晋升等级与列（lvl/col）、城邦宗主加成（cityStates）全在行内。数据面只有 instance / eval / entity（外加 meta 溯源），没有 SQL 工具。
+1. 第 1 步只取 civi6_instance({ civ, leader, speed, difficulty, section:'core' })：它由硬约束决定，含文明套件全文、城邦、中立索引、GlobalParameters 子集，以及 gaps/omitted 两张“这里没有”的清单。然后读 core.manifest.classes 里每一类的 whenToUse 与 bytes，只再取问题真正涉及的 2~5 类（tech-tree / civic-tree / units / districts / buildings / tiles / multipliers / beliefs / promotions / governors），不要一次全取。换胜利线不重取；换文明或速度才重取。
+2. 每类都自带 definition（这一类是什么、不含什么）与 whenToUse（什么时候取），按需读，不要靠猜。行按 content[kind].columns 读，不要按位置猜：官方全文（eff）、已解析公式摘要（fx）、未解析计数（unres）、解锁科技/市政（tech/civic）、前置（req）、单位战力/移动/维护/晋升类/战略资源/升级与取代（cs/rc/mv/mt/pc/res/up/replaces/replacedBy）、政策槽（slot）、信条类别（cls）、政体等级与槽位数（tier/slots）、晋升等级与列（lvl/col）、科技树位与解锁（treeRow/depth/children/unlocks）、总督归属（gov）、城邦宗主加成（cityStates）。数据面只有 instance / eval / meta，没有 SQL 工具，也没有单实体放大镜工具。
 3. 算账一律调用 civi6_eval：builds 给供给侧、gates 给需求侧（会展开前置闭包并计成本），返回 ledger（每币种 required / requiredPerTurn / supplyPerTurn / gap / verdict）、cut（砍单与 slipTurns）、scenarios（low/base/high）与 composition（谁贡献了多少，带 fx_id）。想让某单位/建筑进 plan，就把它的 tech/civic 直接喂给 gates。禁止心算，禁止把描述文字当数字。
-4. 只有两种情况下再用工具：要某实体的官方逐字全文或完整修饰符链时，用 civi6_entity(句柄或 id，可 ids 批量) 取一次；要某个数值确实不在包里时，先查 core.gaps 与 core.omitted——写在那里的一律回答“数据层未收录”，不得用记忆补；两者都没有就是看漏了行，回去按 columns 找。
+4. 要某个数值确实不在包里时，先查 core.gaps 与 core.omitted——写在那里的一律回答“数据层未收录”，不得用记忆补；两者都没有就是看漏了行，回去按 columns 找。行内 unres 是“没有真实描述、已从 fx 丢弃的机制行数”：要数值却没有 fx、且 unres>0 时答“数据层未解析”，但不要因此否定同一行的 eff 文本。
 5. 答案固定 6 段：约束方程 / 供给计划 / 砍单 / 情景 / 路径 / 验收；每段引用 civi6_eval 字段与行内字段，末行“数据依据：BBG 7.5.1 / <entity ids 或句柄>”。`;
 }
 
@@ -4783,8 +5242,8 @@ function buildRulesetPrompt(ruleset, build) {
 - 风云际会（Gathering Storm）是本规则的基础资料片，不是另一个可选数据源；本 KB 没有“无资料片基础版”。
 - 所有文明6数值、成本、产出、前置、效果描述必须来自本轮 civi6_* 工具返回。禁止用预训练知识、禁止直接读 data/*.sqlite、禁止复用本会话中没有工具出处的旧结论。
 - 数值纪律：凡是数（产出/成本/加成/伤害）一律来自工具返回的结构化字段或公式行（dimension + op + value）；文本只用于说明与审计，禁止从文字心算。
-- 内部 ID 的前缀不编码归属：例如 GOVERNOR_PROMOTION_EDUCATOR_* 在 BBG 里可能属于其他总督。总督/晋升归属只认 civi6_entity 返回的 governors[]（列表/详情）或 v_governor_promotion 视图，禁止按 ID 前缀、名称片段或旧对话推断。
-- effects 是已解析的权威效果；unresolved 只是原始机制审计数据。用户问效果时只引用 effects；若追问隐藏/完整机制且涉及 unresolved，再说明“数据层未解析”，不得补写。
+- 内部 ID 的前缀不编码归属：例如 GOVERNOR_PROMOTION_EDUCATOR_* 在 BBG 里可能属于其他总督。总督/晋升归属只认 civi6_instance 的 governors 类里 gov 列（或 v_governor_promotion 视图），禁止按 ID 前缀、名称片段或旧对话推断。
+- 行内 eff 是已解析的权威效果文本，fx 是可执行公式；unres 只是未解析机制计数（>0 即“数据层未解析”）。用户问效果时只引用 eff/fx，不要用记忆补写隐藏机制。
 - 决策数值来自 civi6_eval 的公式组合与计划带（empirical/rule），引用时保留 confidence/source。
 - 回答含文明6事实时，末尾加：数据依据：${label} / <entity ids>。
 - 用户要另一套规则时，说明需修改插件配置 ruleset 并重载，不能按调用切换。${excluded.length ? `\n- 可选子模组未启用：${excluded.join("、")}。` : ""}`;
@@ -4941,18 +5400,20 @@ export function apply(ctx, config = {}) {
     });
   }
 
-  // Model-facing surface (4 tools): data once (instance), arithmetic (eval),
-  // verbatim text / full modifier chain on demand (entity), provenance (meta).
+  // Model-facing surface (3 tools): data once as self-describing classes
+  // (instance), arithmetic (eval), provenance (meta).
   // `civi6_sql` is deliberately NOT registered: as long as a raw query escape
   // hatch exists, the packet never has to be good enough — the measured session
-  // (62 SQL calls after a complete 4-section fetch) is the counterexample. The
-  // factory below stays as an internal QA API for verify scripts only.
+  // (62 SQL calls after a complete fetch) is the counterexample.
+  // `civi6_entity` is deliberately NOT registered either: with `eff` inlined per
+  // row it had no remaining job except shipping the raw modifier chain, which the
+  // protocol forbids as an effect source. It stays as an internal QA API (the
+  // measured session needed 39 of those calls for ~180KB of text).
   // The old exploration surface (plan / search / entities / modifiers / schema)
   // is no longer registered either: it existed to compensate for the missing packet.
   ctx.tools.register(metaTool(getKb));
   ctx.tools.register(instanceTool(getKb));
   ctx.tools.register(evalTool(getKb));
-  ctx.tools.register(entityTool(getKb));
 
   ctx.effect(() => () => {
     try {

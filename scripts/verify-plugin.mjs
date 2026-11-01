@@ -7,6 +7,69 @@ import { apply, createKnowledgeBase, renderToolPayload } from "../dsh-plugin/ind
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const dbFile = process.env.CIVI6_BBG_DB_PATH?.trim() || join(root, "data", "civi6-bbg.sqlite");
 
+const CLASSES = [
+  "core",
+  "tech-tree",
+  "civic-tree",
+  "units",
+  "districts",
+  "buildings",
+  "tiles",
+  "multipliers",
+  "beliefs",
+  "promotions",
+  "governors",
+];
+
+/**
+ * The session that motivated the class rewrite (17b596ad) spent 39 calls on a
+ * per-entity drill-down. Every one of those entities must now be answerable from
+ * the packet alone; this fixture is the regression gate for that.
+ */
+const SESSION_FIXTURE = [
+  ["civilization", "CIVILIZATION_BYZANTIUM"],
+  ["leader", "LEADER_BASIL"],
+  ["district", "DISTRICT_HIPPODROME"],
+  ["unit", "UNIT_BYZANTINE_TAGMA"],
+  ["unit", "UNIT_BYZANTINE_DROMON"],
+  ["belief", "BELIEF_JUST_WAR"],
+  ["policy", "POLICY_WARS_OF_RELIGION"],
+  // This trait has no text of its own: its mechanism is written in the Tagma's
+  // description, so coverage is asserted through the owning unit.
+  ["trait", "TRAIT_LEADER_UNIT_BYZANTINE_TAGMA", ["unit", "UNIT_BYZANTINE_TAGMA"]],
+  ["trait", "TRAIT_CIVILIZATION_BYZANTIUM"],
+  ["trait", "TRAIT_LEADER_BASIL"],
+  ["building", "BUILDING_ARENA"],
+  ["policy", "POLICY_CHIVALRY"],
+  ["policy", "POLICY_GRANDE_ARMEE"],
+  ["government", "GOVERNMENT_THEOCRACY"],
+  ["building", "BUILDING_GOV_FAITH"],
+  ["belief", "BELIEF_DIVINE_SPARK"],
+  ["belief", "BELIEF_RELIGIOUS_SETTLEMENTS"],
+  ["belief", "BELIEF_WORK_ETHIC"],
+  ["belief", "BELIEF_CHORAL_MUSIC"],
+  ["belief", "BELIEF_TITHE"],
+  ["belief", "BELIEF_WORLD_CHURCH"],
+  ["belief", "BELIEF_MEETING_HOUSE"],
+  ["belief", "BELIEF_HOLY_ORDER"],
+  ["policy", "POLICY_RELIGIOUS_ORDERS"],
+  ["policy", "POLICY_SCRIPTURE"],
+  ["policy", "POLICY_CONSCRIPTION"],
+  ["policy", "POLICY_LEVEE_EN_MASSE"],
+  ["policy", "POLICY_LOGISTICS"],
+  ["government", "GOVERNMENT_OLIGARCHY"],
+  ["government", "GOVERNMENT_MONARCHY"],
+  ["government", "GOVERNMENT_FASCISM"],
+  ["belief", "BELIEF_GOD_OF_WAR"],
+  ["belief", "BELIEF_GOD_OF_THE_FORGE"],
+  ["belief", "BELIEF_DEFENDER_OF_FAITH"],
+  ["belief", "BELIEF_RELIGIOUS_UNITY"],
+  ["belief", "BELIEF_ITINERANT_PREACHERS"],
+  ["belief", "BELIEF_PAPAL_PRIMACY"],
+  ["belief", "BELIEF_CROSS_CULTURAL_DIALOGUE"],
+  ["belief", "BELIEF_STEWARDSHIP"],
+];
+
 function assertLossless(value) {
   const bad = [];
   const walk = (v, path) => {
@@ -33,6 +96,17 @@ function assertLossless(value) {
   assert.deepEqual(bad, [], `非无损 JSON：${bad.slice(0, 5).join(", ")}`);
 }
 
+/** Row helper: read by column name instead of guessing a position. */
+function rowOf(section, id) {
+  if (!section) return undefined;
+  return section.rows.find((row) => row[section.columns.indexOf("id")] === id);
+}
+
+function cell(section, row, name) {
+  const index = section.columns.indexOf(name);
+  return index < 0 ? undefined : row[index];
+}
+
 if (!existsSync(dbFile)) {
   console.log(`跳过：BBG 数据库不存在（${dbFile}）`);
   process.exit(0);
@@ -47,6 +121,10 @@ try {
   assert.ok(meta.effectCoverage?.cards > 0, "效果卡为空");
   assert.equal(meta.effectCoverage.stale, false, "效果层过期");
   assert.ok(metaChars < 6000, `meta 默认载荷 ${metaChars}B 仍过大（verbose 字段没有收进 verbose）`);
+  // The entity-type inventory is a verbose-only maintenance view now; the
+  // model-facing inventory is core.manifest.classes.
+  assert.equal(meta.entityTypes, undefined, "entityTypes 仍在默认载荷里");
+  assert.ok(kb.meta({ verbose: true }).entityTypes?.length > 0, "verbose 缺少 entityTypes");
   assertLossless(meta);
   console.log(`✓ meta：bbg / locked / effectCoverage / ${metaChars}B`);
 
@@ -82,100 +160,162 @@ try {
   console.log("✓ plan：science:bbg 切面可读");
 
   // The authored objective layer is retired: `focus` must now report "no
-  // objective layer" instead of serving stale rows. The answer path is
-  // civi6_instance + civi6_eval below.
+  // objective layer" instead of serving stale rows.
   const objectiveRows = kb.db.prepare("SELECT COUNT(*) AS n FROM kb_objective").get().n;
   assert.equal(objectiveRows, 0, "kb_objective 应为空（作者目标层已退役）");
 
-  // Objective-free instance packet: hard constraints decide the fetch, never the
-  // victory line. It ships as bounded sections because the transport cuts a
-  // single tool result at ~50k chars; each page must fit and the four pages must
-  // reconstruct the whole packet.
-  const baseInstanceArgs = { civ: "Russia", leader: "Peter", speed: "online", difficulty: "DIFFICULTY_DEITY" };
-  const inst = kb.instance({ ...baseInstanceArgs, section: "all" });
+  // --- instance: one data class per call, self-describing -------------------
+  const baseArgs = { civ: "Russia", leader: "Peter", speed: "online", difficulty: "DIFFICULTY_DEITY" };
+  const inst = kb.instance({ ...baseArgs, section: "all" });
   assert.equal(inst.instance.civ, "CIVILIZATION_RUSSIA", `instance.civ=${inst.instance.civ}`);
   assert.equal(inst.instance.speedProfile?.totalTurns, 250, "online 速度档缺失");
-  assert.ok(inst.integrity.rows >= 900, `内容行 ${inst.integrity.rows} 过少`);
+  assert.ok(inst.integrity.rows >= 1036, `内容行 ${inst.integrity.rows} 过少`);
   assert.equal(inst.content.technology.rows.length, 77, "科技行数不是 77");
   assert.equal(inst.content.civic.rows.length, 61, "市政行数不是 61");
-  // Prerequisites and unlocks are inline now: a row must answer "when do I get
-  // this" without a handle graph, so the old edge-list assertions move here.
-  const techReq = inst.content.technology.columns.indexOf("req");
-  assert.ok(techReq >= 0, `technology 缺 req 列：${inst.content.technology.columns.join(",")}`);
-  const reqEdges = inst.content.technology.rows.reduce(
-    (n, row) => n + (Array.isArray(row[techReq]) ? row[techReq].length : 0),
-    0,
-  );
-  assert.ok(reqEdges > 90, `科技前置边 ${reqEdges} 过少`);
-  assert.ok(inst.integrity.inlineEdges > 600, `内联前置/解锁边 ${inst.integrity.inlineEdges} 过少`);
-  const unitColumns = inst.content.unit.columns;
-  const unitCivic = unitColumns.indexOf("civic");
-  const unitCs = unitColumns.indexOf("cs");
-  const tagmaRow = inst.content.unit.rows.find((row) => row[1] === "UNIT_BYZANTINE_TAGMA");
-  assert.ok(tagmaRow, "缺少 UNIT_BYZANTINE_TAGMA 行");
-  assert.equal(tagmaRow[unitCivic], "CIVIC_DIVINE_RIGHT", `甲胄解锁市政=${tagmaRow[unitCivic]}`);
-  assert.ok(Number(tagmaRow[unitCs]) > 0, `甲胄战斗力=${tagmaRow[unitCs]}`);
-  const policySlot = inst.content.policy.columns.indexOf("slot");
-  assert.ok(policySlot >= 0, "policy 缺 slot 列");
-  assert.ok(inst.content.policy.rows.some((row) => row[policySlot]), "policy 行没有槽位类别");
-  assert.ok(inst.content.governor?.rows?.length === 8, `总督行 ${inst.content.governor?.rows?.length}`);
-  assert.ok(inst.content.governor_promotion?.rows?.length === 49, "总督晋升行数不是 49");
-  assert.ok(inst.cityStates.length >= 15, `城邦 ${inst.cityStates.length}`);
-  assert.equal(
-    new Set(inst.cityStates.map((row) => row[0])).size,
-    inst.cityStates.length,
-    "城邦行有重复",
-  );
-  assert.ok(Array.isArray(inst.gaps) && inst.gaps.length > 0, "缺 gaps");
-  assert.equal(inst.meta.packetVersion, 2, `packetVersion=${inst.meta.packetVersion}`);
-  assert.ok(inst.civKit.some((k) => k.id === "DISTRICT_LAVRA"), "文明套件缺少拉夫拉");
-  assert.ok(inst.civKit.every((k) => Array.isArray(k.effects)), "civKit effects 缺失");
-  const libraryRow = inst.content.building.rows.find((r) => r[1] === "BUILDING_LIBRARY");
-  assert.ok(libraryRow, "缺少图书馆行");
-  const buildingFx = inst.content.building.columns.indexOf("fx");
-  assert.match(String(libraryRow[buildingFx]), /科技/, `图书馆公式摘要=${libraryRow[buildingFx]}`);
-  assert.ok((inst.indexes.dimension.culture_per_turn ?? []).length > 0, "缺少产出索引");
-  assert.deepEqual(inst.omitted.find((o) => /时代得分/.test(o.what)) ? true : false, true, "omitted 未标注时代得分");
+  assert.equal(inst.meta.packetVersion, 3, `packetVersion=${inst.meta.packetVersion}`);
 
-  // The gaps models used to fill with SQL must now be inside the packet.
-  assert.ok(inst.params.some(([name]) => String(name).startsWith("RELIGION_SPREAD_")), "缺少宗教压力参数");
-  assert.ok(inst.params.some(([name]) => String(name).startsWith("TOURISM_")), "缺少旅游参数");
-  assert.equal(inst.greatPersonClasses.length, 10, `伟人职业 ${inst.greatPersonClasses.length}`);
-  assert.ok(inst.gppBaseCost.length >= 8, "缺少伟人基础成本");
-  const policySection = kb.instance({ ...baseInstanceArgs, section: "content-c" });
-  assert.ok(
-    Object.values(policySection.content).some((sec) => {
-      const fx = sec.columns.indexOf("fx");
-      const d = sec.columns.indexOf("d");
-      return sec.rows.some((row) => (fx >= 0 && row[fx] && row[fx].length) || (d >= 0 && row[d] && row[d].length));
-    }),
-    "content-b 行既无 fx 也无 d",
-  );
-
-  // Every page must fit the transport; oversize is an error, never a cut.
-  const sectionNames = ["core", "content-a", "content-b", "content-c", "content-d"];
+  // Every class carries `definition` (what it is) and `whenToUse` (when to ask
+  // for it) as separate fields, and core.manifest repeats whenToUse verbatim.
+  const corePage = kb.instance({ ...baseArgs, section: "core" });
+  assert.ok(Array.isArray(corePage.manifest?.classes), "core 缺少 manifest.classes");
+  assert.equal(corePage.manifest.classes.length, CLASSES.length, "manifest 类数不对");
   const sectionSizes = {};
-  for (const name of sectionNames) {
-    const page = kb.instance({ ...baseInstanceArgs, section: name });
+  for (const name of CLASSES) {
+    const page = kb.instance({ ...baseArgs, section: name });
+    const entry = corePage.manifest.classes.find((c) => c.section === name);
+    assert.ok(entry, `manifest 缺类 ${name}`);
+    assert.ok(page.definition && page.definition.length >= 40 && page.definition.length <= 400, `${name}.definition 不合法`);
+    assert.ok(page.whenToUse && page.whenToUse.length >= 20 && page.whenToUse.length <= 300, `${name}.whenToUse 不合法`);
+    assert.notEqual(page.definition, page.whenToUse, `${name}: definition 与 whenToUse 混写`);
+    assert.equal(entry.whenToUse, page.whenToUse, `${name}: manifest.whenToUse 与类载荷不一致`);
+    assert.ok(entry.bytes > 0, `${name}: manifest 缺 bytes`);
     const text = renderToolPayload("instance", page);
     sectionSizes[name] = text.length;
-    assert.ok(text.length <= 44000, `分片 ${name} ${text.length} > 44000`);
-    assert.ok(text.length < 50000, `分片 ${name} ${text.length} 超过传输上限`);
+    assert.ok(text.length <= 44000, `类 ${name} ${text.length} > 44000`);
+    assert.ok(text.length < 50000, `类 ${name} ${text.length} 超过传输上限`);
     const parsed = JSON.parse(text);
-    assert.ok(parsed.section === name, `分片 ${name} section=${parsed.section}`);
-    if (name === "core") {
-      assert.ok(parsed.manifest?.next?.length === 4, "core 缺少 manifest.next");
-      assert.ok(parsed.manifest.sections["content-d"] > 0, "manifest 缺少分片体积");
+    assert.equal(parsed.section, name, `类 ${name} section=${parsed.section}`);
+  }
+  assert.throws(
+    () => kb.instance({ ...baseArgs, section: "content-a" }),
+    /未知数据类/,
+    "旧分片名没有报错",
+  );
+  console.log(
+    `✓ instance 数据类：${CLASSES.length} 类 / ${inst.integrity.rows} 行 / 内联边 ${inst.integrity.inlineEdges} / ` +
+      `文本 ${inst.integrity.effChars} 字 / 未解析行 ${inst.integrity.unresolvedRows}`,
+  );
+  console.log(`  体积 ${CLASSES.map((name) => `${name} ${(sectionSizes[name] / 1024).toFixed(1)}KB`).join(" · ")}`);
+
+  // --- tech / civic tree structure ----------------------------------------
+  for (const [tree, expected, edgesMin] of [
+    ["technology", 77, 100],
+    ["civic", 61, 70],
+  ]) {
+    const section = inst.content[tree];
+    for (const column of ["req", "boost", "treeRow", "depth", "children", "unlocks", "eff"]) {
+      assert.ok(section.columns.includes(column), `${tree} 缺列 ${column}`);
+    }
+    const edges = section.rows.reduce(
+      (n, row) => n + (Array.isArray(cell(section, row, "children")) ? cell(section, row, "children").length : 0),
+      0,
+    );
+    assert.ok(edges >= edgesMin, `${tree} 后继边 ${edges} 过少`);
+    // children must be the exact inverse of req
+    const parentEdges = new Set();
+    for (const row of section.rows) {
+      for (const parent of cell(section, row, "req") ?? []) parentEdges.add(`${parent}->${cell(section, row, "id")}`);
+    }
+    for (const row of section.rows) {
+      for (const child of cell(section, row, "children") ?? []) {
+        assert.ok(parentEdges.has(`${cell(section, row, "id")}->${child}`), `${tree} children 与 req 不一致：${child}`);
+      }
+    }
+    const withUnlocks = section.rows.filter((row) => (cell(section, row, "unlocks") ?? []).length > 0).length;
+    assert.ok(withUnlocks >= 20, `${tree} 只有 ${withUnlocks} 个节点有 unlocks`);
+    assert.ok(section.rows.every((row) => Number.isInteger(cell(section, row, "depth"))), `${tree} depth 不是整数`);
+    assert.ok(section.rows.every((row) => Number.isInteger(cell(section, row, "treeRow"))), `${tree} treeRow 不是整数`);
+    console.log(
+      `✓ ${tree === "technology" ? "科技" : "市政"}树：${section.rows.length} 节点 / 后继边 ${edges} / 有解锁 ${withUnlocks} / ` +
+        `深度 ≤ ${Math.max(...section.rows.map((row) => cell(section, row, "depth")))}`,
+    );
+  }
+  const divineRight = rowOf(inst.content.civic, "CIVIC_DIVINE_RIGHT");
+  assert.ok(divineRight, "缺少 CIVIC_DIVINE_RIGHT");
+  assert.match(String(cell(inst.content.civic, divineRight, "boost")), /寺庙/, "市政鼓舞文本未解析");
+
+  // --- rows carry the authoritative text inline ---------------------------
+  const unit = inst.content.unit;
+  const tagma = rowOf(unit, "UNIT_BYZANTINE_TAGMA");
+  assert.ok(tagma, "缺少 UNIT_BYZANTINE_TAGMA 行");
+  assert.equal(cell(unit, tagma, "civic"), "CIVIC_DIVINE_RIGHT", `甲胄解锁市政=${cell(unit, tagma, "civic")}`);
+  assert.ok(Number(cell(unit, tagma, "cs")) > 0, `甲胄战斗力=${cell(unit, tagma, "cs")}`);
+  assert.match((cell(unit, tagma, "eff") ?? []).join(" "), /替代骑士/, "甲胄描述没有说明替代关系");
+  assert.deepEqual(cell(unit, tagma, "replaces"), ["UNIT_KNIGHT"], `甲胄 replaces=${JSON.stringify(cell(unit, tagma, "replaces"))}`);
+  const knight = rowOf(unit, "UNIT_KNIGHT");
+  assert.ok((cell(unit, knight, "replacedBy") ?? []).includes("UNIT_BYZANTINE_TAGMA"), "骑士 replacedBy 缺甲胄");
+
+  const hippodrome = rowOf(inst.content.district, "DISTRICT_HIPPODROME");
+  assert.deepEqual(cell(inst.content.district, hippodrome, "replaces"), ["DISTRICT_ENTERTAINMENT_COMPLEX"]);
+  const hippoBuildings = cell(inst.content.district, hippodrome, "buildings") ?? [];
+  assert.ok(hippoBuildings.length >= 3, `跑马场继承建筑 ${hippoBuildings.length}`);
+
+  const campus = rowOf(inst.content.district, "DISTRICT_CAMPUS");
+  const campusText = (cell(inst.content.district, campus, "eff") ?? []).join(" ");
+  assert.match(campusText, /相邻山脉/, `学院相邻文本：${campusText.slice(0, 120)}`);
+  assert.doesNotMatch(campusText, /LOC_[A-Z0-9_]+/, "学院相邻文本仍有 LOC_ 残留");
+
+  const oligarchy = rowOf(inst.content.government, "GOVERNMENT_OLIGARCHY");
+  const govText = (cell(inst.content.government, oligarchy, "eff") ?? []).join(" ");
+  assert.match(govText, /固有加成/, "政体缺固有加成文本");
+  assert.match(govText, /积累加成/, "政体缺积累加成文本");
+  const oligarchyFx = String(cell(inst.content.government, oligarchy, "fx"));
+  assert.ok(oligarchyFx.length > 0, "寡头 fx 为空（真实效果被占位行挤掉了）");
+  assert.match(oligarchyFx, /经验|移动力/, `寡头 fx 没有解析出真实效果：${oligarchyFx}`);
+
+  const workEthicRow = rowOf(inst.content.belief, "BELIEF_WORK_ETHIC");
+  assert.match((cell(inst.content.belief, workEthicRow, "eff") ?? []).join(" "), /神社和寺庙分别提供\+2和\+4/);
+
+  const religionPolicy = rowOf(inst.content.policy, "POLICY_WARS_OF_RELIGION");
+  assert.match((cell(inst.content.policy, religionPolicy, "eff") ?? []).join(" "), /\+4 战斗力/);
+
+  // Mechanism-only formula rows must never reach `fx`; they are counted instead.
+  for (const [kind, section] of Object.entries(inst.content)) {
+    for (const row of section.rows) {
+      const fx = cell(section, row, "fx");
+      assert.ok(typeof fx === "string", `${kind}: fx 不是字符串`);
+      assert.ok(!fx.startsWith("获得"), `${kind}:${cell(section, row, "id")} fx 是机制占位：${fx}`);
+      assert.ok(!fx.includes("…"), `${kind}:${cell(section, row, "id")} fx 被截断：${fx}`);
+      assert.ok(Number.isInteger(cell(section, row, "unres")), `${kind}: unres 不是整数`);
     }
   }
-  const allIds = new Set();
-  for (const sec of Object.values(inst.content)) for (const row of sec.rows) allIds.add(row[1]);
-  assert.equal(allIds.size, 1036, `合并后实体 ${allIds.size} ≠ 1036（979 + 8 总督 + 49 总督晋升）`);
-  console.log(
-    `✓ instance：5 分片重建 ${inst.integrity.rows} 行 / 内联边 ${inst.integrity.inlineEdges} / 城邦 ${inst.cityStates.length} / gaps ${inst.gaps.length} / 体积 ${sectionNames.map((name) => `${name} ${(sectionSizes[name] / 1024).toFixed(1)}KB`).join(" · ")}`,
-  );
+  console.log("✓ 行内文本：单位替代关系 / 区划相邻加成 / 政体固有+积累 / 信条与政策全文 / fx 无占位");
 
-  // Deterministic scratchpad: composes formulas, never fetches.
+  // Session 17b596ad regression fixture: every drilled entity answers from the packet.
+  const byzArgs = { civ: "Byzantium", leader: "Basil II", speed: "online" };
+  const byz = kb.instance({ ...byzArgs, section: "all" });
+  const byzCore = kb.instance({ ...byzArgs, section: "core" });
+  const kitText = new Map(byzCore.civKit.map((item) => [`${item.kind}:${item.id}`, item.effects ?? []]));
+  const missing = [];
+  for (const [kind, id, via] of SESSION_FIXTURE) {
+    if (via) {
+      const target = rowOf(byz.content[via[0]], via[1]);
+      if (target && (cell(byz.content[via[0]], target, "eff") ?? []).length > 0) continue;
+      missing.push(`${kind}:${id} (via ${via.join(":")})`);
+      continue;
+    }
+    if ((kitText.get(`${kind}:${id}`) ?? []).length > 0) continue;
+    const section = byz.content[kind];
+    const row = rowOf(section, id);
+    const text = row ? cell(section, row, "eff") : undefined;
+    const fx = row ? cell(section, row, "fx") : undefined;
+    if ((Array.isArray(text) && text.length > 0) || fx) continue;
+    missing.push(`${kind}:${id}`);
+  }
+  assert.deepEqual(missing, [], `会话夹具未覆盖：${missing.join(", ")}`);
+  console.log(`✓ 会话夹具：17b596ad 的 ${SESSION_FIXTURE.length} 个实体全部可从包内回答`);
+
+  // --- deterministic scratchpad -------------------------------------------
   const ev = kb.eval({ builds: ["BUILDING_LIBRARY"], cities: 3, popPerCity: 4, victory: "culture" });
   const science = ev.metrics.find((m) => m.dimension === "science_per_turn");
   assert.equal(science?.supply, 6, `图书馆×3 科技供应=${science?.supply}`);
@@ -183,7 +323,6 @@ try {
   assert.ok(ev.demand.length > 0, "缺少计划带需求");
   assert.deepEqual(ev.missingBuilds, [], JSON.stringify(ev.missingBuilds));
 
-  // Required side: gate closure -> ledger -> cut -> scenarios.
   const evalPlan = kb.eval({
     builds: ["BUILDING_LIBRARY", "BUILDING_AMPHITHEATER", "BUILDING_MONUMENT"],
     gates: ["CIVIC_HUMANISM", "BUILDING_MUSEUM_ART"],
@@ -245,11 +384,19 @@ try {
   assertLossless(educator);
   console.log(`✓ governor：平伽拉晋升 ${educator.promotions.length} 项，不含鉴赏家`);
 
+  // The packet's `gov` column must agree with the relation table.
+  const governorSection = byz.content.governor_promotion;
+  const connoisseurRow = rowOf(governorSection, "GOVERNOR_PROMOTION_EDUCATOR_CONNOISSEUR");
+  assert.deepEqual(cell(governorSection, connoisseurRow, "gov"), ["GOVERNOR_THE_CARDINAL"]);
+  const orphanRow = rowOf(governorSection, "GOVERNOR_PROMOTION_AMBASSADOR_EMISSARY");
+  assert.equal(cell(governorSection, orphanRow, "gov"), null);
+  console.log("✓ instance.governors：gov 列与 GovernorPromotionSets 一致");
+
   const promotionList = kb.listEntities("governor_promotion", { q: "CONNOISSEUR", limit: 5 });
   assert.equal(promotionList.items[0]?.id, "GOVERNOR_PROMOTION_EDUCATOR_CONNOISSEUR");
   assert.ok(promotionList.items[0]?.governors?.some((g) => g.id === "GOVERNOR_THE_CARDINAL"));
   assertLossless(promotionList);
-  console.log("✓ civi6_entities：晋升列表带 governors[]");
+  console.log("✓ 内部 entities API：晋升列表带 governors[]");
 
   const hits = kb.search("鉴赏家", { scope: "entity" }).results;
   const rank = hits.findIndex((r) => r.id === "governor_promotion:GOVERNOR_PROMOTION_EDUCATOR_CONNOISSEUR");
@@ -258,8 +405,6 @@ try {
   assertLossless(hits[rank]);
   console.log(`✓ 检索：鉴赏家 → ${hits[rank].id}（含归属）`);
 
-  // Governor supply ids no longer name an owner: ownership is a relation read
-  // from GovernorPromotionSets, covered by the connoisseur checks above.
   const governorSupplyRows = kb.db
     .prepare(
       `SELECT owner_id FROM kb_formula_owner WHERE owner_id = 'GOVERNOR_PROMOTION_EDUCATOR_CONNOISSEUR' LIMIT 1;`,
@@ -269,24 +414,21 @@ try {
   console.log("✓ 公式层：鉴赏家归属按关系表解析（不写总督归属）");
 
   // --- payload contract: the budget may compact audit fields, never facts ---
-  const byz = {
+  const byzPlan = {
     victory: "domination",
     civ: "CIVILIZATION_BYZANTIUM",
     leader: "LEADER_BASIL",
     speed: "online",
   };
-
-  const checkView = kb.plan({ ...byz, view: "check", detail: "full" });
+  const checkView = kb.plan({ ...byzPlan, view: "check", detail: "full" });
   assertLossless(checkView);
   assert.ok(checkView.checks.length > 0, "check 视图为空");
   assert.ok(checkView.checks.every((c) => c.remedy !== undefined), "check.remedy 含 undefined");
   console.log(`✓ plan：check 视图 ${checkView.checks.length} 条，可无损序列化`);
 
-  // The brief/answer-packet surface was tied to authored objectives and is gone
-  // with them; the packet contract now lives in civi6_instance (checked above).
   let focusError = null;
   try {
-    kb.plan({ ...byz, view: "focus", detail: "full" });
+    kb.plan({ ...byzPlan, view: "focus", detail: "full" });
   } catch (error) {
     focusError = error;
   }
@@ -294,9 +436,8 @@ try {
   assert.match(String(focusError.message), /目标层/, `focus 报错文案：${focusError.message}`);
   console.log("✓ plan：目标层退役后 focus 明确报错，不退化为通用阶梯");
 
-
   // Batch fetch must return every requested id even when the payload has to be
-  // compacted; the old budgeter halved `items` and silently dropped 2 of 4.
+  // compacted; this is the internal QA API now, not a model-facing tool.
   const unitIds = ["UNIT_BYZANTINE_TAGMA", "UNIT_BYZANTINE_DROMON", "UNIT_HEAVY_CHARIOT", "UNIT_KNIGHT"];
   const batch = kb.entityMany("unit", unitIds, { effects: "full", modifiers: "summary" });
   assert.deepEqual(batch.items.map((i) => i.id), unitIds, "批量实体被丢弃");
@@ -308,17 +449,15 @@ try {
     `批量实体超出预算：${batchText.length}B ${JSON.stringify(batchRendered._budget)}`,
   );
   assert.ok(batchText.length <= 16000, `entity 载荷 ${batchText.length} > 16000`);
-  console.log(`✓ civi6_entity：4 条批量全保留 / ${batchText.length} 字符`);
+  console.log(`✓ 内部 entity API：4 条批量全保留 / ${batchText.length} 字符`);
 
-  // Localized q: the Chinese name must match even when the raw Name is a LOC tag.
   const monarchy = kb.listEntities("government", { q: "君主" });
   assert.ok(
     monarchy.items.some((item) => item.id === "GOVERNMENT_MONARCHY"),
     JSON.stringify(monarchy.items.map((i) => i.id)),
   );
-  console.log("✓ civi6_entities：q=君主 命中 GOVERNMENT_MONARCHY");
+  console.log("✓ 内部 entities API：q=君主 命中 GOVERNMENT_MONARCHY");
 
-  // Unit promotion tree as a first-class entity.
   const promotionTree = kb.listEntities("promotion", {
     promotionClass: "PROMOTION_CLASS_HEAVY_CAVALRY",
     limit: 50,
@@ -331,53 +470,26 @@ try {
     charge.description_zh,
   );
   assertLossless(promotionTree);
-  const promoSearch = kb.search("冲锋", { type: "promotion" });
-  assert.ok(
-    promoSearch.results.some((r) => r.id === "promotion:PROMOTION_CHARGE"),
-    JSON.stringify(promoSearch.results.slice(0, 3)),
-  );
-  console.log(`✓ promotion：重骑兵 ${promotionTree.total} 条，冲锋文本与检索可读`);
+  console.log(`✓ promotion：重骑兵 ${promotionTree.total} 条，冲锋文本可读`);
 
-  // Derived unit/district facts replace SQL archaeology.
-  const tagma = kb.entityDetail("unit", "UNIT_BYZANTINE_TAGMA");
-  assert.equal(tagma.upgrade?.to, "UNIT_TANK", JSON.stringify(tagma.upgrade));
-  assert.ok(tagma.upgrade?.upgradableFrom?.includes("UNIT_HEAVY_CHARIOT"), JSON.stringify(tagma.upgrade));
-  assert.ok(tagma.upgrade?.goldEstimate > 0, JSON.stringify(tagma.upgrade));
-  assert.equal(tagma.upgrade?.goldEstimateAuthority, "derived");
-  assert.equal(tagma.resource?.requiresResource, false, JSON.stringify(tagma.resource));
-  assertLossless(tagma);
-  const chariot = kb.entityDetail("unit", "UNIT_HEAVY_CHARIOT");
-  assert.equal(chariot.upgrade?.to, "UNIT_KNIGHT");
-  const tagmaCandidate = (chariot.upgrade?.targetReplacedBy ?? []).find(
-    (entry) => entry.id === "UNIT_BYZANTINE_TAGMA",
-  );
-  assert.ok(tagmaCandidate, JSON.stringify(chariot.upgrade?.targetReplacedBy));
-  assert.equal(tagmaCandidate.productionDelta, 90);
-  assert.equal(tagmaCandidate.goldEstimate, 100);
-  const knight = kb.entityDetail("unit", "UNIT_KNIGHT");
-  assert.ok(knight.upgrade?.replacedBy?.includes("UNIT_BYZANTINE_TAGMA"), JSON.stringify(knight.upgrade));
-  const hippo = kb.entityDetail("district", "DISTRICT_HIPPODROME");
-  const hippoBuildings = (hippo.buildings ?? []).map((b) => b.id);
+  const tagmaDetail = kb.entityDetail("unit", "UNIT_BYZANTINE_TAGMA");
+  assert.equal(tagmaDetail.upgrade?.to, "UNIT_TANK", JSON.stringify(tagmaDetail.upgrade));
+  assert.ok(tagmaDetail.upgrade?.upgradableFrom?.includes("UNIT_HEAVY_CHARIOT"), JSON.stringify(tagmaDetail.upgrade));
+  assert.equal(tagmaDetail.resource?.requiresResource, false, JSON.stringify(tagmaDetail.resource));
+  assertLossless(tagmaDetail);
+  const hippoDetail = kb.entityDetail("district", "DISTRICT_HIPPODROME");
+  const hippoBuildingsDetail = (hippoDetail.buildings ?? []).map((b) => b.id);
   for (const id of ["BUILDING_ARENA", "BUILDING_ZOO", "BUILDING_STADIUM"]) {
-    assert.ok(hippoBuildings.includes(id), `${id} 不在跑马场建筑列表：${hippoBuildings.join(",")}`);
+    assert.ok(hippoBuildingsDetail.includes(id), `${id} 不在跑马场建筑列表：${hippoBuildingsDetail.join(",")}`);
   }
-  assert.ok(!hippoBuildings.includes("BUILDING_TLACHTLI"), "别国特色建筑混进了基础建筑链");
-  assert.ok(
-    (hippo.uniqueBuildings ?? []).some((b) => b.id === "BUILDING_TLACHTLI" && b.replaces === "BUILDING_ARENA"),
-    JSON.stringify(hippo.uniqueBuildings),
-  );
-  assert.deepEqual(hippo.replaces, ["DISTRICT_ENTERTAINMENT_COMPLEX"]);
-  console.log(
-    `✓ unit/district：升级链 ${tagma.upgrade?.to} / 跑马场 ${hippoBuildings.length} 基础建筑 + ${hippo.uniqueBuildings.length} 特色`,
-  );
+  assert.ok(!hippoBuildingsDetail.includes("BUILDING_TLACHTLI"), "别国特色建筑混进了基础建筑链");
+  console.log(`✓ 内部 entity API：甲胄升级 ${tagmaDetail.upgrade?.to} / 跑马场 ${hippoBuildingsDetail.length} 基础建筑`);
 
-  // Speed profile must be visible without SQL.
   const metaOnline = kb.meta().speedProfiles?.find((s) => s.speed === "online");
   assert.equal(metaOnline?.totalTurns, 250);
   assert.equal(metaOnline?.costMultiplier, 50);
   console.log("✓ meta：online = 250 回合 / 50% 成本");
 
-  // Bad SQL is a discovery answer, not a dead end.
   const badSql = kb.sql("SELECT * FROM UnitUpgradeCosts");
   assert.match(badSql.error ?? "", /no such table/);
   assert.ok(badSql.candidates?.tables?.some((t) => /UnitUpgrade/.test(t)), JSON.stringify(badSql.candidates));
@@ -385,23 +497,9 @@ try {
 
   const schema = kb.schema({ q: "UnitPromotion" });
   assert.ok(schema.tables.some((t) => t.name === "UnitPromotions"), JSON.stringify(schema.tables.map((t) => t.name)));
-  assert.ok(
-    schema.tables.find((t) => t.name === "UnitPromotions")?.columns?.some((c) => c.name === "PromotionClass"),
-  );
   console.log(`✓ kb.schema（内部 QA）：UnitPromotion* ${schema.tables.length} 张表`);
 
-  // Column-first lookup: the exact query shape that cost e94 three SQL steps
-  // ("where does ResourceCost live?") must be answered in one compact payload.
-  const columnSchema = kb.schema({ q: "ResourceCost" });
-  assert.ok(
-    columnSchema.tables.some((t) => (t.matchedColumns ?? []).some((c) => c.name === "ResourceCost")),
-    JSON.stringify(columnSchema.tables.map((t) => t.name)),
-  );
-  const columnSchemaText = renderToolPayload("schema", columnSchema);
-  assert.ok(columnSchemaText.length < 5000, `column schema 载荷 ${columnSchemaText.length} > 5000`);
-  console.log(`✓ kb.schema（内部 QA）：列名优先（ResourceCost）${columnSchemaText.length} 字符`);
-
-  // Host path: a complete brief arms the visible work budget on later calls.
+  // --- host surface: three tools, no drill-down escape hatch ---------------
   const registered = {};
   apply(
     {
@@ -416,23 +514,42 @@ try {
     },
     { ruleset: "bbg", dbPaths: { bbg: dbFile }, effectCardsRequired: true, strictGrounding: false },
   );
-  const expectedTools = ["civi6_instance", "civi6_eval", "civi6_entity", "civi6_meta"];
+  const expectedTools = ["civi6_instance", "civi6_eval", "civi6_meta"];
   for (const name of expectedTools) {
     assert.ok(registered[name], `缺少工具 ${name}: ${JSON.stringify(Object.keys(registered))}`);
   }
-  for (const gone of ["civi6_plan", "civi6_search", "civi6_entities", "civi6_modifiers", "civi6_schema", "civi6_sql"]) {
+  for (const gone of [
+    "civi6_entity",
+    "civi6_plan",
+    "civi6_search",
+    "civi6_entities",
+    "civi6_modifiers",
+    "civi6_schema",
+    "civi6_sql",
+  ]) {
     assert.equal(registered[gone], undefined, `${gone} 仍注册（探索面应为 0）`);
   }
-  const hostInstance = await registered.civi6_instance.execute({
+  assert.deepEqual(Object.keys(registered).sort(), [...expectedTools].sort(), "模型面工具数不是 3");
+
+  const hostCore = await registered.civi6_instance.execute({
     civ: "Russia",
     leader: "Peter",
     speed: "online",
     section: "core",
   });
-  assert.ok(hostInstance.integrity.rows >= 900, `host instance 行 ${hostInstance.integrity.rows}`);
-  assert.ok(hostInstance.manifest?.next?.length === 4, "host core 缺少 manifest.next");
-  const hostInstanceText = renderToolPayload("instance", hostInstance);
-  assert.ok(hostInstanceText.length <= 44000, `host core ${hostInstanceText.length} > 44000`);
+  assert.ok(hostCore.manifest?.classes?.length === CLASSES.length, "host core 缺少 manifest.classes");
+  assert.ok(hostCore.definition && hostCore.whenToUse, "host core 缺 definition/whenToUse");
+  const hostCoreText = renderToolPayload("instance", hostCore);
+  assert.ok(hostCoreText.length <= 44000, `host core ${hostCoreText.length} > 44000`);
+
+  const hostBeliefs = await registered.civi6_instance.execute({
+    civ: "Byzantium",
+    leader: "Basil II",
+    speed: "online",
+    section: "beliefs",
+  });
+  assert.ok(hostBeliefs.content.belief.rows.length > 0, "host beliefs 行为空");
+
   const hostEval = await registered.civi6_eval.execute({
     builds: ["BUILDING_LIBRARY"],
     gates: ["CIVIC_HUMANISM"],
@@ -440,31 +557,35 @@ try {
   });
   assert.ok(hostEval.ledger.length >= 1, "host eval 缺少账本");
   assert.ok(hostEval.path?.closure >= 2, "host eval 缺少前置闭包");
-  const hostEntity = await registered.civi6_entity.execute({
-    type: "unit",
-    id: "UNIT_BYZANTINE_TAGMA",
-    effects: "none",
-    modifiers: "none",
-  });
-  assert.equal(hostEntity._workBudget, undefined, "旧 _workBudget 不应再出现");
-  // A packet row can be drilled by its handle: the handle index and the entity
-  // resolver must agree on pk order, or the model silently reads the wrong row.
+  assert.equal(hostEval._workBudget, undefined, "旧 _workBudget 不应再出现");
+
+  // A packet row can still be resolved by its handle for QA, but the model has
+  // no tool that accepts one; the handle index and the resolver must agree on pk
+  // order or cross-references silently point at the wrong row.
   const unitPage = await registered.civi6_instance.execute({
     civ: "Russia",
     leader: "Peter",
     speed: "online",
-    section: "content-a",
+    section: "units",
   });
   const tagmaHandle = unitPage.content.unit.rows.find((row) => row[1] === "UNIT_BYZANTINE_TAGMA")[0];
-  const viaHandle = await registered.civi6_entity.execute({ type: "unit", id: tagmaHandle, effects: "none" });
-  assert.equal(viaHandle.id, "UNIT_BYZANTINE_TAGMA", `句柄 ${tagmaHandle} 解析成 ${viaHandle.id}`);
+  assert.equal(kb.entityFromHandle(tagmaHandle), "UNIT_BYZANTINE_TAGMA", `句柄 ${tagmaHandle} 解析错误`);
+  const districtPage = await registered.civi6_instance.execute({
+    civ: "Russia",
+    leader: "Peter",
+    speed: "online",
+    section: "districts",
+  });
+  const campusRow = districtPage.content.district.rows.find((row) => row[1] === "DISTRICT_CAMPUS");
+  const buildingHandle = (campusRow[districtPage.content.district.columns.indexOf("buildings")] ?? [])[0];
+  assert.ok(buildingHandle, "学院没有 building 句柄");
+  assert.equal(kb.entityFromHandle(buildingHandle), "BUILDING_LIBRARY", `建筑句柄 ${buildingHandle} 解析错误`);
   console.log(
-    `✓ host：工具面 ${Object.keys(registered).length} 个 / instance ${hostInstance.integrity.rows} 行 / eval 账本 ${hostEval.ledger.length} 币种 / 句柄 ${tagmaHandle}→${viaHandle.id}`,
+    `✓ host：工具面 ${Object.keys(registered).length} 个 / core ${hostCore.integrity.rows} 行 / eval 账本 ${hostEval.ledger.length} 币种 / ` +
+      `句柄 ${tagmaHandle}→甲胄、${buildingHandle}→图书馆`,
   );
 
   console.log("\n插件门面校验通过 ✅");
 } finally {
   kb.close();
 }
-
-

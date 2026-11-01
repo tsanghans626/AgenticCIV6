@@ -6,6 +6,10 @@
  * Session logs are multi-frame zstd JSONL; node:zlib decodes one frame at a
  * time, so the frames are split on the zstd magic and each is validated.
  *
+ * After the class rewrite the interesting signals are: how many instance data
+ * classes a question actually needs, whether any is fetched twice, and whether
+ * the retired `civi6_entity` tool reappears (which would mean a stale plugin).
+ *
  * usage:
  *   node scripts/analyze-session.mjs                 # 5 most recent sessions
  *   node scripts/analyze-session.mjs <dir-or-file>   # one session (dir or .zstd)
@@ -121,8 +125,8 @@ function analyze(events, file) {
   const tools = {};
   const errors = {};
   const truncated = [];
-  const droppedIds = [];
-  const seenEntityIds = new Map();
+  const instanceSections = new Map();
+  let entityCalls = 0;
 
   for (const event of events) {
     if (event.type !== "tool/result") continue;
@@ -134,20 +138,18 @@ function analyze(events, file) {
     if (text.includes('"truncated":true')) truncated.push({ step: event.data.step, tool: name, chars: text.length });
     if (call?.step && steps.has(call.step)) steps.get(call.step).resultChars += text.length;
 
-    if (name === "civi6_entity" && call) {
+    if (name === "civi6_instance" && call) {
       let args = {};
       try {
         args = JSON.parse(call.arguments ?? "{}");
       } catch {
         args = {};
       }
-      const ids = (args.ids ?? (args.id ? [args.id] : [])).map(String);
-      for (const id of ids) {
-        const key = `${args.type}:${id}`;
-        seenEntityIds.set(key, (seenEntityIds.get(key) ?? 0) + 1);
-        if (!text.includes(id)) droppedIds.push({ step: call.step, id });
-      }
+      const key = `${args.civ ?? ""}|${args.leader ?? ""}|${args.speed ?? ""}|${args.section ?? ""}`;
+      instanceSections.set(key, (instanceSections.get(key) ?? 0) + 1);
     }
+    // civi6_entity is retired: any occurrence means a stale plugin build.
+    if (name === "civi6_entity") entityCalls += 1;
   }
 
   const assistant = events.filter((e) => e.type === "assistant/message");
@@ -178,7 +180,7 @@ function analyze(events, file) {
     })
     .sort((a, b) => a.step - b.step);
   const end = events.at(-1)?.time ?? startedAt;
-  const duplicates = [...seenEntityIds.entries()].filter(([, n]) => n > 1);
+  const repeatedSections = [...instanceSections.entries()].filter(([, n]) => n > 1);
 
   return {
     file,
@@ -190,8 +192,9 @@ function analyze(events, file) {
     tools,
     errors,
     truncated: truncated.length,
-    droppedIds: droppedIds.length,
-    duplicateIds: duplicates.length,
+    entityCalls,
+    instanceSections: [...instanceSections.values()].reduce((a, b) => a + b, 0),
+    repeatedSections: repeatedSections.length,
     usage,
     slowestSteps: [...stepRows].sort((a, b) => (b.wall ?? 0) - (a.wall ?? 0)).slice(0, 5),
     stepRows,
@@ -215,7 +218,9 @@ function printOne(m) {
     .map(([name, n]) => `${name.replace("civi6_", "")}:${n}${m.errors[name] ? `(err ${m.errors[name]})` : ""}`)
     .join("  ");
   console.log(`tools  ${toolLine}`);
-  console.log(`drops  truncated ${m.truncated} | droppedIds ${m.droppedIds} | duplicateEntityIds ${m.duplicateIds}`);
+  console.log(
+    `drops  truncated ${m.truncated} | instanceSections ${m.instanceSections} (repeated ${m.repeatedSections}) | entityCalls ${m.entityCalls}`,
+  );
   console.log(
     `slow   ${m.slowestSteps.map((s) => `S${s.step}:${s.wall}s/${s.output}tok`).join("  ")}`,
   );
@@ -239,5 +244,5 @@ if (asJson) {
 } else {
   for (const summary of summaries) printOne(summary);
   console.log("\nread it as: wall ≈ steps × (TTFT + output tokens / decode rate);");
-  console.log("watch steps, output tokens, truncated payloads, droppedIds and duplicateEntityIds.");
+  console.log("watch steps, output tokens, truncated payloads, repeated section fetches and entityCalls (must be 0).");
 }
