@@ -365,12 +365,18 @@ export function formatGameText(
   if (typeof raw !== "string" || !raw) return { text: null, raw: null, resolved: false, fallback: false };
   let text = raw;
   let fallback = false;
-  if (text.startsWith("LOC_")) {
-    const z = zh.get(text);
-    const e = en.get(text);
-    if (!z && !e) return { text: null, raw, resolved: false, fallback: false };
-    text = z?.text ?? e?.text ?? text;
-    fallback = !z?.text && !!e?.text;
+  // Not every mod tag starts with `LOC_` (BBG ships `BBG_LOC_*`), so a value that
+  // *is* a localization key counts as a tag too. Conversely some shipped rows are
+  // placeholders whose Text is the tag itself; those are not a sentence and must
+  // stay unresolved instead of leaking the id into player-facing text.
+  const zhHit = zh.get(text);
+  const enHit = en.get(text);
+  if (text.startsWith("LOC_") || !!zhHit || !!enHit) {
+    if (!zhHit && !enHit) return { text: null, raw, resolved: false, fallback: false };
+    const localized = zhHit?.text ?? enHit?.text ?? text;
+    if (localized === text) return { text: null, raw, resolved: false, fallback: false };
+    fallback = !zhHit?.text && !!enHit?.text;
+    text = localized;
   }
   const original = text;
 
@@ -583,6 +589,20 @@ function addDescription(
   const id = String(row[spec.pk]);
   const tag = str(row.Description);
   if (!tag) return;
+  // A description tag that is missing from the localization table is a data gap,
+  // not text. Leaking the id into `description_zh` used to ship
+  // "LOC_TRAIT_..._DESCRIPTION" as if it were a sentence.
+  const known = zh.get(tag) ?? en.get(tag);
+  if (!known && (tag.startsWith("LOC_") || /^[A-Z][A-Z0-9_]{4,}$/.test(tag))) {
+    card.unresolved.push({
+      modifierId: "",
+      modifierType: "DESCRIPTION",
+      arguments: {},
+      requirementSetId: null,
+      reason: `描述 tag 不在本地化表：${tag}`,
+    });
+    return;
+  }
   const f = formatTagBoth(tag, {}, zh, en);
   // Some official descriptions embed another lookup tag, e.g.
   // "{LOC_GOVERNOR_THE_CARDINAL_NAME} 是...". formatGameText leaves those as
@@ -831,32 +851,81 @@ function addDistrictEffects(kb: KnowledgeDb, card: EffectCard, id: string, zh: T
     )) {
       const yn = yieldName(String(r.YieldType), zh, en);
       const amount = Number(r.YieldChange);
-      const desc = str(r.Description);
-      if (desc) {
-        const f = formatTagBoth(desc, {}, zh, en);
-        addSimpleEffect(
-          card,
-          "adjacency",
-          `${f.zh.text ?? desc}：+${amount} ${yn.zh}`,
-          `${f.en.text ?? desc}: +${amount} ${yn.en}`,
-          { table: "Adjacency_YieldChanges", pk: String(r.ID ?? id), col: "YieldChange" },
-          "table",
-          amount,
-          yieldUnit(String(r.YieldType)),
-        );
-      } else {
-        addSimpleEffect(
-          card,
-          "adjacency",
-          `相邻加成：+${amount} ${yn.zh}`,
-          `Adjacency bonus: +${amount} ${yn.en}`,
-          { table: "Adjacency_YieldChanges", pk: String(r.ID ?? id), col: "YieldChange" },
-          "table",
-          amount,
-          yieldUnit(String(r.YieldType)),
-        );
-      }
+      const label = adjacencyText(str(r.Description), amount, yn, zh, en);
+      addSimpleEffect(
+        card,
+        "adjacency",
+        label.zh,
+        label.en,
+        { table: "Adjacency_YieldChanges", pk: String(r.ID ?? id), col: "YieldChange" },
+        "table",
+        amount,
+        yieldUnit(String(r.YieldType)),
+      );
     }
+  }
+}
+
+/**
+ * Adjacency descriptions are `{1_num}`-parameterised ("相邻山脉：+{1_num} 科技值").
+ * Without the argument the sentence stays unresolved and the old fallback leaked
+ * the raw `LOC_` tag, which made the one place that records the adjacency
+ * *condition* unreadable. The amount is already inside the localized sentence,
+ * so appending "+N 科技值" again would duplicate it; only the unresolved case
+ * falls back to a generic label (never to the tag).
+ */
+function adjacencyText(
+  desc: string | null,
+  amount: number,
+  yn: { zh: string; en: string },
+  zh: TextIndex,
+  en: TextIndex,
+): { zh: string; en: string } {
+  const args = { "1_num": String(amount), "1_Num": String(amount) };
+  const f = desc ? formatTagBoth(desc, args, zh, en) : null;
+  return {
+    zh: f?.zh.resolved && f.zh.text ? f.zh.text : `相邻加成：+${amount} ${yn.zh}`,
+    en: f?.en.resolved && f.en.text ? f.en.text : `Adjacency bonus: +${amount} ${yn.en}`,
+  };
+}
+
+/**
+ * Governments have no `Description` column: the official player-facing text
+ * lives in `InherentBonusDesc` + `AccumulatedBonusDesc`. Without this card the
+ * only text was the raw modifier chain, so "what does this government do" could
+ * not be answered from the packet at all.
+ */
+function addGovernmentBonusTexts(
+  kb: KnowledgeDb,
+  card: EffectCard,
+  id: string,
+  zh: TextIndex,
+  en: TextIndex,
+): void {
+  if (!kb.hasTable("Governments")) return;
+  const row = kb.get<Record<string, unknown>>(
+    `SELECT GovernmentType, InherentBonusDesc, AccumulatedBonusDesc FROM Governments WHERE GovernmentType = ?;`,
+    id,
+  );
+  if (!row) return;
+  const parts: [string, string, string, string | null][] = [
+    ["固有加成", "Inherent bonus", "InherentBonusDesc", str(row.InherentBonusDesc)],
+    ["积累加成", "Accumulated bonus", "AccumulatedBonusDesc", str(row.AccumulatedBonusDesc)],
+  ];
+  for (const [labelZh, labelEn, col, tag] of parts) {
+    if (!tag) continue;
+    const f = formatTagBoth(tag, {}, zh, en);
+    const textZh = f.zh.resolved ? f.zh.text : null;
+    const textEn = f.en.resolved ? f.en.text : null;
+    if (!textZh && !textEn) continue;
+    addSimpleEffect(
+      card,
+      "description",
+      textZh ? `${labelZh}：${textZh}` : "",
+      textEn ? `${labelEn}: ${textEn}` : "",
+      { table: "Governments", pk: id, col },
+      "official",
+    );
   }
 }
 
@@ -884,13 +953,12 @@ function addImprovementEffects(kb: KnowledgeDb, card: EffectCard, id: string, zh
     )) {
       const yn = yieldName(String(r.YieldType), zh, en);
       const amount = Number(r.YieldChange);
-      const desc = str(r.Description);
-      const f = desc ? formatTagBoth(desc, {}, zh, en) : null;
+      const label = adjacencyText(str(r.Description), amount, yn, zh, en);
       addSimpleEffect(
         card,
         "adjacency",
-        `${f?.zh.text ?? desc ?? "相邻加成"}：+${amount} ${yn.zh}`,
-        `${f?.en.text ?? desc ?? "Adjacency bonus"}: +${amount} ${yn.en}`,
+        label.zh,
+        label.en,
         { table: "Adjacency_YieldChanges", pk: String(r.ID ?? id), col: "YieldChange" },
         "table",
         amount,
@@ -1449,6 +1517,9 @@ export function buildEffectCards(
             break;
           case "unit":
             addUnitAbilityDescriptions(kb, card, id, zh, en);
+            break;
+          case "government":
+            addGovernmentBonusTexts(kb, card, id, zh, en);
             break;
           case "civilization": {
             const traits = kb.hasTable("CivilizationTraits")

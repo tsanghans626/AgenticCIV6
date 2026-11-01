@@ -171,11 +171,23 @@ function checkDb(file, source) {
       }
     });
 
-    check("belief/building/governor 效果文本无 LOC_ / 残留占位符", () => {
+    check("每个政体都有固有/积累加成文本（数据层无 Description 列）", () => {
+      const rows = db.prepare("SELECT GovernmentType FROM Governments").all();
+      assert.ok(rows.length > 0, "Governments 为空");
+      for (const r of rows) {
+        const c = card(db, `government:${r.GovernmentType}`);
+        const texts = c.effects.filter((e) => e.kind === "description").map((e) => e.text_zh ?? "");
+        assert.ok(texts.some((t) => /固有加成/.test(t)), `${r.GovernmentType} 缺固有加成`);
+        assert.ok(texts.some((t) => /积累加成/.test(t)), `${r.GovernmentType} 缺积累加成`);
+        for (const e of c.effects) {
+          assert.equal(e.resolved, true, `${r.GovernmentType} 有未解析效果`);
+        }
+      }
+    });
+
+    check("全部效果文本无 LOC_ / 残留占位符", () => {
       const rows = db
-        .prepare(
-          "SELECT card_id, description_zh, effects_json FROM effect_cards WHERE owner_kind IN ('belief','building','governor','governor_promotion')",
-        )
+        .prepare("SELECT card_id, owner_kind, description_zh, effects_json FROM effect_cards")
         .all();
       for (const r of rows) {
         const texts = [r.description_zh ?? "", ...JSON.parse(r.effects_json).map((e) => e.text_zh ?? "")];
@@ -184,6 +196,14 @@ function checkDb(file, source) {
           assert.doesNotMatch(text, /\{[^}]*\}/, `${r.card_id}: ${text}`);
         }
       }
+    });
+
+    check("区划相邻加成带条件文本（{1_num} 已替换）", () => {
+      const c = card(db, "district:DISTRICT_CAMPUS");
+      const adjacency = c.effects.filter((e) => e.kind === "adjacency").map((e) => e.text_zh ?? "");
+      assert.ok(adjacency.length > 0, "学院没有相邻加成效果");
+      assert.ok(adjacency.some((t) => /相邻山脉/.test(t)), JSON.stringify(adjacency.slice(0, 5)));
+      assert.ok(adjacency.every((t) => !/\{/.test(t)), JSON.stringify(adjacency.filter((t) => /\{/.test(t))));
     });
 
     check("每条效果都有出处，effects 数组全部 resolved", () => {
