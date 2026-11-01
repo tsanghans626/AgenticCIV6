@@ -98,11 +98,42 @@ try {
   assert.ok(inst.integrity.rows >= 900, `内容行 ${inst.integrity.rows} 过少`);
   assert.equal(inst.content.technology.rows.length, 77, "科技行数不是 77");
   assert.equal(inst.content.civic.rows.length, 61, "市政行数不是 61");
-  assert.ok(inst.relations.length > 500, `前置关系 ${inst.relations.length} 过少`);
+  // Prerequisites and unlocks are inline now: a row must answer "when do I get
+  // this" without a handle graph, so the old edge-list assertions move here.
+  const techReq = inst.content.technology.columns.indexOf("req");
+  assert.ok(techReq >= 0, `technology 缺 req 列：${inst.content.technology.columns.join(",")}`);
+  const reqEdges = inst.content.technology.rows.reduce(
+    (n, row) => n + (Array.isArray(row[techReq]) ? row[techReq].length : 0),
+    0,
+  );
+  assert.ok(reqEdges > 90, `科技前置边 ${reqEdges} 过少`);
+  assert.ok(inst.integrity.inlineEdges > 600, `内联前置/解锁边 ${inst.integrity.inlineEdges} 过少`);
+  const unitColumns = inst.content.unit.columns;
+  const unitCivic = unitColumns.indexOf("civic");
+  const unitCs = unitColumns.indexOf("cs");
+  const tagmaRow = inst.content.unit.rows.find((row) => row[1] === "UNIT_BYZANTINE_TAGMA");
+  assert.ok(tagmaRow, "缺少 UNIT_BYZANTINE_TAGMA 行");
+  assert.equal(tagmaRow[unitCivic], "CIVIC_DIVINE_RIGHT", `甲胄解锁市政=${tagmaRow[unitCivic]}`);
+  assert.ok(Number(tagmaRow[unitCs]) > 0, `甲胄战斗力=${tagmaRow[unitCs]}`);
+  const policySlot = inst.content.policy.columns.indexOf("slot");
+  assert.ok(policySlot >= 0, "policy 缺 slot 列");
+  assert.ok(inst.content.policy.rows.some((row) => row[policySlot]), "policy 行没有槽位类别");
+  assert.ok(inst.content.governor?.rows?.length === 8, `总督行 ${inst.content.governor?.rows?.length}`);
+  assert.ok(inst.content.governor_promotion?.rows?.length === 49, "总督晋升行数不是 49");
+  assert.ok(inst.cityStates.length >= 15, `城邦 ${inst.cityStates.length}`);
+  assert.equal(
+    new Set(inst.cityStates.map((row) => row[0])).size,
+    inst.cityStates.length,
+    "城邦行有重复",
+  );
+  assert.ok(Array.isArray(inst.gaps) && inst.gaps.length > 0, "缺 gaps");
+  assert.equal(inst.meta.packetVersion, 2, `packetVersion=${inst.meta.packetVersion}`);
   assert.ok(inst.civKit.some((k) => k.id === "DISTRICT_LAVRA"), "文明套件缺少拉夫拉");
+  assert.ok(inst.civKit.every((k) => Array.isArray(k.effects)), "civKit effects 缺失");
   const libraryRow = inst.content.building.rows.find((r) => r[1] === "BUILDING_LIBRARY");
   assert.ok(libraryRow, "缺少图书馆行");
-  assert.match(String(libraryRow[5]), /科技/, `图书馆公式摘要=${libraryRow[5]}`);
+  const buildingFx = inst.content.building.columns.indexOf("fx");
+  assert.match(String(libraryRow[buildingFx]), /科技/, `图书馆公式摘要=${libraryRow[buildingFx]}`);
   assert.ok((inst.indexes.dimension.culture_per_turn ?? []).length > 0, "缺少产出索引");
   assert.deepEqual(inst.omitted.find((o) => /时代得分/.test(o.what)) ? true : false, true, "omitted 未标注时代得分");
 
@@ -113,14 +144,17 @@ try {
   assert.ok(inst.gppBaseCost.length >= 8, "缺少伟人基础成本");
   const policySection = kb.instance({ ...baseInstanceArgs, section: "content-b" });
   assert.ok(
-    Object.values(policySection.content).some((sec) =>
-      sec.rows.some((row) => (row[5] && row[5].length) || (row[6] && row[6].length)),
-    ),
+    Object.values(policySection.content).some((sec) => {
+      const fx = sec.columns.indexOf("fx");
+      const d = sec.columns.indexOf("d");
+      return sec.rows.some((row) => (fx >= 0 && row[fx] && row[fx].length) || (d >= 0 && row[d] && row[d].length));
+    }),
     "content-b 行既无 fx 也无 d",
   );
 
   // Every page must fit the transport; oversize is an error, never a cut.
-  for (const name of ["core", "content-a", "content-b", "content-c"]) {
+  const sectionNames = ["core", "content-a", "content-b", "content-c", "content-d"];
+  for (const name of sectionNames) {
     const page = kb.instance({ ...baseInstanceArgs, section: name });
     const text = renderToolPayload("instance", page);
     assert.ok(text.length <= 44000, `分片 ${name} ${text.length} > 44000`);
@@ -128,15 +162,15 @@ try {
     const parsed = JSON.parse(text);
     assert.ok(parsed.section === name, `分片 ${name} section=${parsed.section}`);
     if (name === "core") {
-      assert.ok(parsed.manifest?.next?.length === 3, "core 缺少 manifest.next");
-      assert.ok(parsed.manifest.sections["content-c"] > 0, "manifest 缺少分片体积");
+      assert.ok(parsed.manifest?.next?.length === 4, "core 缺少 manifest.next");
+      assert.ok(parsed.manifest.sections["content-d"] > 0, "manifest 缺少分片体积");
     }
   }
   const allIds = new Set();
   for (const sec of Object.values(inst.content)) for (const row of sec.rows) allIds.add(row[1]);
-  assert.equal(allIds.size, 979, `合并后实体 ${allIds.size} ≠ 979`);
+  assert.equal(allIds.size, 1036, `合并后实体 ${allIds.size} ≠ 1036（979 + 8 总督 + 49 总督晋升）`);
   console.log(
-    `✓ instance：4 分片重建 ${inst.integrity.rows} 行 / ${inst.integrity.relations} 前置 / 参数 ${inst.params.length} / 标志 ${inst.boosts.length}`,
+    `✓ instance：5 分片重建 ${inst.integrity.rows} 行 / 内联边 ${inst.integrity.inlineEdges} / 城邦 ${inst.cityStates.length} / gaps ${inst.gaps.length}`,
   );
 
   // Deterministic scratchpad: composes formulas, never fetches.
@@ -345,14 +379,14 @@ try {
   const badSql = kb.sql("SELECT * FROM UnitUpgradeCosts");
   assert.match(badSql.error ?? "", /no such table/);
   assert.ok(badSql.candidates?.tables?.some((t) => /UnitUpgrade/.test(t)), JSON.stringify(badSql.candidates));
-  console.log(`✓ civi6_sql：缺表返回候选 ${badSql.candidates.tables.join(",")}`);
+  console.log(`✓ kb.sql（内部 QA）：缺表返回候选 ${badSql.candidates.tables.join(",")}`);
 
   const schema = kb.schema({ q: "UnitPromotion" });
   assert.ok(schema.tables.some((t) => t.name === "UnitPromotions"), JSON.stringify(schema.tables.map((t) => t.name)));
   assert.ok(
     schema.tables.find((t) => t.name === "UnitPromotions")?.columns?.some((c) => c.name === "PromotionClass"),
   );
-  console.log(`✓ civi6_schema：UnitPromotion* ${schema.tables.length} 张表`);
+  console.log(`✓ kb.schema（内部 QA）：UnitPromotion* ${schema.tables.length} 张表`);
 
   // Column-first lookup: the exact query shape that cost e94 three SQL steps
   // ("where does ResourceCost live?") must be answered in one compact payload.
@@ -363,7 +397,7 @@ try {
   );
   const columnSchemaText = renderToolPayload("schema", columnSchema);
   assert.ok(columnSchemaText.length < 5000, `column schema 载荷 ${columnSchemaText.length} > 5000`);
-  console.log(`✓ civi6_schema：列名优先（ResourceCost）${columnSchemaText.length} 字符`);
+  console.log(`✓ kb.schema（内部 QA）：列名优先（ResourceCost）${columnSchemaText.length} 字符`);
 
   // Host path: a complete brief arms the visible work budget on later calls.
   const registered = {};
@@ -380,11 +414,11 @@ try {
     },
     { ruleset: "bbg", dbPaths: { bbg: dbFile }, effectCardsRequired: true, strictGrounding: false },
   );
-  const expectedTools = ["civi6_instance", "civi6_eval", "civi6_entity", "civi6_sql", "civi6_meta"];
+  const expectedTools = ["civi6_instance", "civi6_eval", "civi6_entity", "civi6_meta"];
   for (const name of expectedTools) {
     assert.ok(registered[name], `缺少工具 ${name}: ${JSON.stringify(Object.keys(registered))}`);
   }
-  for (const gone of ["civi6_plan", "civi6_search", "civi6_entities", "civi6_modifiers", "civi6_schema"]) {
+  for (const gone of ["civi6_plan", "civi6_search", "civi6_entities", "civi6_modifiers", "civi6_schema", "civi6_sql"]) {
     assert.equal(registered[gone], undefined, `${gone} 仍注册（探索面应为 0）`);
   }
   const hostInstance = await registered.civi6_instance.execute({
@@ -394,7 +428,7 @@ try {
     section: "core",
   });
   assert.ok(hostInstance.integrity.rows >= 900, `host instance 行 ${hostInstance.integrity.rows}`);
-  assert.ok(hostInstance.manifest?.next?.length === 3, "host core 缺少 manifest.next");
+  assert.ok(hostInstance.manifest?.next?.length === 4, "host core 缺少 manifest.next");
   const hostInstanceText = renderToolPayload("instance", hostInstance);
   assert.ok(hostInstanceText.length <= 44000, `host core ${hostInstanceText.length} > 44000`);
   const hostEval = await registered.civi6_eval.execute({
@@ -411,11 +445,24 @@ try {
     modifiers: "none",
   });
   assert.equal(hostEntity._workBudget, undefined, "旧 _workBudget 不应再出现");
+  // A packet row can be drilled by its handle: the handle index and the entity
+  // resolver must agree on pk order, or the model silently reads the wrong row.
+  const unitPage = await registered.civi6_instance.execute({
+    civ: "Russia",
+    leader: "Peter",
+    speed: "online",
+    section: "content-a",
+  });
+  const tagmaHandle = unitPage.content.unit.rows.find((row) => row[1] === "UNIT_BYZANTINE_TAGMA")[0];
+  const viaHandle = await registered.civi6_entity.execute({ type: "unit", id: tagmaHandle, effects: "none" });
+  assert.equal(viaHandle.id, "UNIT_BYZANTINE_TAGMA", `句柄 ${tagmaHandle} 解析成 ${viaHandle.id}`);
   console.log(
-    `✓ host：工具面 ${Object.keys(registered).length} 个 / instance ${hostInstance.integrity.rows} 行 / eval 账本 ${hostEval.ledger.length} 币种`,
+    `✓ host：工具面 ${Object.keys(registered).length} 个 / instance ${hostInstance.integrity.rows} 行 / eval 账本 ${hostEval.ledger.length} 币种 / 句柄 ${tagmaHandle}→${viaHandle.id}`,
   );
 
   console.log("\n插件门面校验通过 ✅");
 } finally {
   kb.close();
 }
+
+

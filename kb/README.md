@@ -312,7 +312,7 @@ npm run build:all        # 完整构建（ingest + 效果层 + KB + 索引）
   - `speed='online'`：按 `kb_speed_profile` 缩放回合与科技/市政成本（生产类成本不缩放）；
   - `detail='full'`：附带闭包、公式、置信度、来源。
 - `civi6_search({ q, scope:'plan' })`：检索预计算卡片，返回完整 `body`。
-- 旧工具 `civi6_entity` / `civi6_modifiers` / `civi6_sql` 保留，用于下钻原始数据。
+- 模型面只保留 `civi6_instance`（一次取数，行内已连接）/ `civi6_eval`（算账）/ `civi6_entity`（官方全文与修饰符链）/ `civi6_meta`（溯源）。`civi6_sql` / `civi6_schema` / `civi6_modifiers` 等原始数据工具已下线：它们让"包不够用"永远有退路，实测会把 4 片包变成 62 次 SQL。
 
 ## 7. 验收
 

@@ -2736,13 +2736,12 @@ export function createKnowledgeBase(dbPath, sourceName = "vanilla") {
     instance(opts = {}) {
       const section = String(opts?.section ?? "core");
       if (section !== "all") return buildInstanceSection(ctx, opts ?? {}, section);
-      const pages = ["core", "content-a", "content-b", "content-c"].map((name) =>
+      const pages = Object.keys(INSTANCE_SECTIONS).map((name) =>
         buildInstanceSection(ctx, opts ?? {}, name),
       );
       const merged = { ...pages[0], content: {} };
       for (const page of pages) {
         Object.assign(merged.content, page.content ?? {});
-        if (page.boosts) merged.boosts = page.boosts;
       }
       return merged;
     },
@@ -3325,15 +3324,72 @@ const INSTANCE_KINDS = [
   { kind: "resource", handle: "r", table: "Resources", pk: "ResourceType", name: "Name", era: null, cost: null },
   { kind: "project", handle: "pr", table: "Projects", pk: "ProjectType", name: "Name", era: null, cost: "Cost" },
   { kind: "promotion", handle: "pm", table: "UnitPromotions", pk: "UnitPromotionType", name: "Name", era: null, cost: null },
+  { kind: "governor", handle: "gv", table: "Governors", pk: "GovernorType", name: "Name", era: null, cost: null },
+  { kind: "governor_promotion", handle: "gp", table: "GovernorPromotions", pk: "GovernorPromotionType", name: "Name", era: null, cost: null },
 ];
 
+/**
+ * Fields appended to every row after the shared [h, id, name, era, cost, fx]
+ * prefix, so a row is already join'd: unlock, prerequisites and the stats that
+ * decide timing are inline instead of being recoverable only from edge lists.
+ * The order here IS the column order reported in `content[kind].columns`.
+ */
+const INSTANCE_FIELDS = {
+  technology: ["req", "boost"],
+  civic: ["req", "boost"],
+  building: ["tech", "civic", "district", "tier", "py", "maint"],
+  district: ["tech", "civic"],
+  unit: ["tech", "civic", "cs", "rc", "mv", "mt", "pc", "res", "py", "up"],
+  project: ["tech", "civic"],
+  policy: ["tech", "civic", "slot"],
+  government: ["tier", "slots"],
+  belief: ["cls", "adopt"],
+  improvement: ["tech", "civic"],
+  resource: ["tech", "civic"],
+  promotion: ["cls", "lvl", "col", "req"],
+  governor: [],
+  governor_promotion: ["lvl", "col", "req", "gov"],
+};
+
+/** Raw table columns an instance kind needs beyond pk/name/era/cost/prereq. */
+const INSTANCE_EXTRA_COLUMNS = {
+  unit: ["Combat", "RangedCombat", "BaseMoves", "Maintenance", "PromotionClass", "StrategicResource", "PurchaseYield"],
+  building: ["GovernmentTierRequirement", "PurchaseYield", "Maintenance"],
+  policy: ["GovernmentSlotType"],
+  government: ["Tier"],
+  belief: ["BeliefClassType", "AdoptionOrder"],
+  promotion: ["PromotionClass", "Level", "Column"],
+  governor_promotion: ["Level", "Column"],
+};
+
 const INSTANCE_OMITTED = [
-  { what: "时代得分 / 黄金时代与决议", reason: "规则库无对应表（数据层未收录）" },
-  { what: "伟人个体名单与抢人顺序", reason: "个体伟人不在本包；只给伟人职业与基础成本" },
-  { what: "城邦 / 对手文明", reason: "不可选，属于外部环境" },
-  { what: "自然奇观 / 地貌 / 地形", reason: "不可主动选择" },
-  { what: "巨作清单", reason: "由巨作槽与伟人产出间接决定" },
+  { what: "时代得分 / 黄金时代与决议", reason: "规则库无对应表（数据层未收录），不要给数值" },
+  { what: "伟人个体名单与抢人顺序", reason: "个体伟人不在库内；只给伟人职业与基础成本" },
+  { what: "自然奇观", reason: "规则库无独立表；地形/地貌可用 civi6_entity type=terrain|feature 取原始行" },
+  { what: "巨作清单", reason: "由巨作槽与伟人产出间接决定，不在库内" },
+  {
+    what: "未进 cityStates 的城邦宗主加成",
+    reason:
+      "CityStates 表只覆盖 18 个城邦（54 行＝基础/迭起兴衰/风云际会三层重复，已按 id 合并）；喀布尔、普雷斯拉夫等只有名称与 LOC_CIVILIZATION_*_BONUS 标签，且 XP1/XP2 文本版本混杂、未解析，不写数值",
+  },
 ];
+
+/**
+ * Field-level honesty channel: what the rows deliberately do NOT carry. With no
+ * SQL tool, this list is the only way the model can tell "the packet is short
+ * here" from "the data does not exist" — leaving it out invites memory-filling.
+ */
+const INSTANCE_GAPS = [
+  { what: "单位升级金币价 / 信仰买价", reason: "只有 PurchaseYield（允许的币种）；价格公式不在规则库" },
+  { what: "建筑购买价", reason: "同上：只有 PurchaseYield，没有价格" },
+  { what: "政策槽数量", reason: "行内 slot 是槽位类别；数量随政体/科技变化，见 government.slots" },
+  { what: "科技/市政 OR 型前置", reason: "req 是 TechnologyPrereqs / CivicPrereqs 的 AND 列表；RequirementSets 的 OR 组未展开" },
+  { what: "每行 fx 超过 3 条的部分", reason: "fx 最多 3 条公式摘要；官方逐字全文与完整修饰符链用 civi6_entity(句柄)" },
+  { what: "光环/叠加上限等隐藏机制", reason: "包内只有官方 effects 文本；是否作用于自身、能否叠加要按修饰符与要求集判定，用 civi6_entity(句柄, modifiers='full')" },
+  { what: "总督就任/调任的成本与忠诚度机制", reason: "库里只有总督与晋升本身；机制数值不在规则库" },
+];
+
+const INSTANCE_OMITTED_NOTE = "omitted 是数据层没有的量；gaps 是包内没带的字段。两者之外，包内一定有一行——找不到就是看漏了 columns。";
 
 function tableColumnsOf(ctx, table) {
   try {
@@ -3345,18 +3401,22 @@ function tableColumnsOf(ctx, table) {
 
 /**
  * Sections exist because the transport cuts a single tool result at ~50k chars:
- * the full packet is ~90k, so it must arrive as a checklist of bounded pages the
- * model can request in one parallel step. A section that exceeds its budget
+ * the full packet is ~110k, so it must arrive as a checklist of bounded pages
+ * the model can request in one parallel step. A section that exceeds its budget
  * fails loudly here instead of being silently truncated by the harness.
+ *
+ * The split is by row width, not by theme: after inlining unlock/prereq/stats,
+ * unit+building alone are ~38KB, so the previous 4-way split no longer fits.
  */
 const INSTANCE_SECTIONS = {
   core: [],
-  "content-a": ["technology", "civic", "building", "district", "unit", "project"],
-  "content-b": ["policy", "government", "belief"],
-  "content-c": ["improvement", "resource", "promotion"],
+  "content-a": ["unit", "district", "project"],
+  "content-b": ["building", "improvement", "resource", "government"],
+  "content-c": ["technology", "civic", "policy", "belief"],
+  "content-d": ["promotion", "governor", "governor_promotion"],
 };
 const INSTANCE_SECTION_BUDGET = 44000;
-const DESC_KINDS = new Set(["policy", "government", "belief", "promotion", "improvement", "resource"]);
+const DESC_KINDS = new Set(["policy", "government", "belief", "promotion", "improvement", "resource", "governor", "governor_promotion"]);
 
 function buildInstanceData(ctx, args) {
   if (!hasTable(ctx, "kb_formula") || !hasTable(ctx, "kb_formula_owner")) {
@@ -3460,11 +3520,84 @@ function buildInstanceData(ctx, args) {
       .join(";");
   }
 
-  // --- content: every choosable entity, compact rows ----------------------
+  // The civ kit keeps the first three effect lines on purpose: effect cards for
+  // a unique unit also list modifiers that only apply conditionally (another
+  // civ's suzerain/great-person bonuses), and shipping the full list as if it
+  // were innate is worse than shipping less. Hidden stacking questions are the
+  // `gaps` entry pointing at civi6_entity(modifiers:'full').
+
+  // --- inline maps: the joins this packet used to expose as a handle graph --
+  const pushInto = (map, key, value) => {
+    const list = map.get(key);
+    if (list) list.push(value);
+    else map.set(key, [value]);
+  };
+  const prereqOf = new Map();
+  if (hasTable(ctx, "TechnologyPrereqs")) {
+    for (const r of q(ctx, "SELECT Technology, PrereqTech FROM TechnologyPrereqs;")) {
+      if (r.Technology && r.PrereqTech) pushInto(prereqOf, `technology:${String(r.Technology)}`, String(r.PrereqTech));
+    }
+  }
+  if (hasTable(ctx, "CivicPrereqs")) {
+    for (const r of q(ctx, "SELECT Civic, PrereqCivic FROM CivicPrereqs;")) {
+      if (r.Civic && r.PrereqCivic) pushInto(prereqOf, `civic:${String(r.Civic)}`, String(r.PrereqCivic));
+    }
+  }
+  const promotionPrereq = new Map();
+  if (hasTable(ctx, "UnitPromotionPrereqs")) {
+    for (const r of q(ctx, "SELECT UnitPromotion, PrereqUnitPromotion FROM UnitPromotionPrereqs;")) {
+      if (r.UnitPromotion && r.PrereqUnitPromotion) {
+        pushInto(promotionPrereq, String(r.UnitPromotion), String(r.PrereqUnitPromotion));
+      }
+    }
+  }
+  const upgradesTo = new Map();
+  if (hasTable(ctx, "UnitUpgrades")) {
+    for (const r of q(ctx, "SELECT Unit, UpgradeUnit FROM UnitUpgrades;")) {
+      if (r.Unit && r.UpgradeUnit) pushInto(upgradesTo, String(r.Unit), String(r.UpgradeUnit));
+    }
+  }
+  const boostsById = new Map();
+  if (hasTable(ctx, "Boosts")) {
+    const boostRows = q(ctx, "SELECT TechnologyType, CivicType, TriggerDescription FROM Boosts;");
+    const boostTags = boostRows.map((r) => String(r.TriggerDescription ?? "")).filter((t) => t.startsWith("LOC_"));
+    const boostLookup = boostTags.length ? localizeMany(ctx, boostTags, "zh_Hans_CN") : () => undefined;
+    for (const r of boostRows) {
+      const id = r.TechnologyType ?? r.CivicType;
+      const text = boostLookup(String(r.TriggerDescription ?? "")) ?? r.TriggerDescription;
+      if (id && text) boostsById.set(String(id), String(text));
+    }
+  }
+  const governmentSlots = new Map();
+  if (hasTable(ctx, "Government_SlotCounts")) {
+    for (const r of q(ctx, "SELECT GovernmentType, GovernmentSlotType, NumSlots FROM Government_SlotCounts;")) {
+      const key = String(r.GovernmentType ?? "");
+      if (!key) continue;
+      const slots = governmentSlots.get(key) ?? {};
+      const slot = String(r.GovernmentSlotType ?? "").replace(/^SLOT_/, "").toLowerCase() || "other";
+      slots[slot] = Number(r.NumSlots) || 0;
+      governmentSlots.set(key, slots);
+    }
+  }
+  // Adoption order lives on the class, not on the belief row.
+  const beliefAdopt = new Map();
+  if (hasTable(ctx, "BeliefClasses")) {
+    for (const r of q(ctx, "SELECT BeliefClassType, AdoptionOrder FROM BeliefClasses;")) {
+      if (r.BeliefClassType) beliefAdopt.set(String(r.BeliefClassType), r.AdoptionOrder ?? null);
+    }
+  }
+  let governorOwners = new Map();
+  if (hasTable(ctx, "GovernorPromotions")) {
+    const promotionIds = q(ctx, "SELECT GovernorPromotionType FROM GovernorPromotions;")
+      .map((r) => String(r.GovernorPromotionType ?? ""))
+      .filter(Boolean);
+    if (promotionIds.length) governorOwners = governorOwnersOf(ctx, promotionIds);
+  }
+
+  // --- content: every choosable entity, rows already join'd ----------------
   const handles = new Map(); // `${kind}:${id}` -> handle
   const content = {};
   const counts = {};
-  const eraIndex = new Map(); // eraIndex -> [handles]
   const tags = [];
   const kindRows = new Map();
   for (const spec of INSTANCE_KINDS) {
@@ -3475,8 +3608,12 @@ function buildInstanceData(ctx, args) {
     for (const col of [spec.name, spec.era, spec.cost, "PrereqTech", "PrereqCivic", "PrereqDistrict"]) {
       if (col && cols.has(col)) select.push(col);
     }
+    for (const col of INSTANCE_EXTRA_COLUMNS[spec.kind] ?? []) {
+      if (cols.has(col)) select.push(col);
+    }
     const rows = q(ctx, `SELECT ${[...new Set(select)].map((c) => `"${c}"`).join(", ")} FROM "${spec.table}";`);
     rows.sort((a, b) => String(a[spec.pk]).localeCompare(String(b[spec.pk])));
+    const fields = INSTANCE_FIELDS[spec.kind] ?? [];
     const out = [];
     rows.forEach((row, i) => {
       const id = String(row[spec.pk] ?? "");
@@ -3507,51 +3644,66 @@ function buildInstanceData(ctx, args) {
       )]
         .slice(0, 3)
         .join(";");
+      const raw = (col) => (col && cols.has(col) ? row[col] ?? null : null);
+      const fieldValue = (field) => {
+        switch (field) {
+          case "req":
+            return prereqOf.get(`${spec.kind}:${id}`) ?? promotionPrereq.get(id) ?? null;
+          case "boost":
+            return boostsById.get(id) ?? null;
+          case "tech":
+            return raw("PrereqTech");
+          case "civic":
+            return raw("PrereqCivic");
+          case "district":
+            return raw("PrereqDistrict");
+          case "tier":
+            return raw("GovernmentTierRequirement") ?? raw("Tier");
+          case "py":
+            return raw("PurchaseYield");
+          case "maint":
+            return raw("Maintenance");
+          case "cs":
+            return raw("Combat");
+          case "rc":
+            return raw("RangedCombat");
+          case "mv":
+            return raw("BaseMoves");
+          case "mt":
+            return raw("Maintenance");
+          case "pc":
+            return raw("PromotionClass");
+          case "res":
+            return raw("StrategicResource");
+          case "slot":
+            return raw("GovernmentSlotType");
+          case "cls":
+            return raw("BeliefClassType") ?? raw("PromotionClass");
+          case "adopt":
+            return beliefAdopt.get(raw("BeliefClassType")) ?? raw("AdoptionOrder");
+          case "lvl":
+            return raw("Level");
+          case "col":
+            return raw("Column");
+          case "slots":
+            return governmentSlots.get(id) ?? null;
+          case "up":
+            return upgradesTo.get(id) ?? null;
+          case "gov": {
+            const owners = governorOwners.get(id) ?? [];
+            return owners.length ? owners.map((entry) => entry.id) : null;
+          }
+          default:
+            return null;
+        }
+      };
       const rowOut = [handle, id, nameTag, eraIdx, row[spec.cost] ?? null, fx];
+      for (const field of fields) rowOut.push(fieldValue(field));
       out.push(rowOut);
       kindRows.set(`${spec.kind}:${id}`, { id, era, row: rowOut });
-      if (eraIdx !== null) {
-        let bucket = eraIndex.get(eraIdx);
-        if (!bucket) {
-          bucket = [];
-          eraIndex.set(eraIdx, bucket);
-        }
-        if (bucket.length < 400) bucket.push(handle);
-      }
     });
-    content[spec.kind] = { columns: ["h", "id", "name", "era", "cost", "fx"], rows: out };
+    content[spec.kind] = { columns: ["h", "id", "name", "era", "cost", "fx", ...fields], rows: out };
     counts[spec.kind] = out.length;
-  }
-
-  // --- relations: prerequisites as handle pairs ---------------------------
-  const relations = [];
-  const addEdge = (fromKind, fromId, toKind, toId) => {
-    const a = handles.get(`${fromKind}:${fromId}`);
-    const b = handles.get(`${toKind}:${toId}`);
-    if (a && b) relations.push([a, b]);
-  };
-  if (hasTable(ctx, "TechnologyPrereqs")) {
-    for (const r of q(ctx, "SELECT Technology, PrereqTech FROM TechnologyPrereqs;")) {
-      addEdge("technology", r.Technology, "technology", r.PrereqTech);
-    }
-  }
-  if (hasTable(ctx, "CivicPrereqs")) {
-    for (const r of q(ctx, "SELECT Civic, PrereqCivic FROM CivicPrereqs;")) {
-      addEdge("civic", r.Civic, "civic", r.PrereqCivic);
-    }
-  }
-  for (const spec of INSTANCE_KINDS) {
-    if (!hasTable(ctx, spec.table)) continue;
-    const cols = tableColumnsOf(ctx, spec.table);
-    if (!cols.has("PrereqTech") && !cols.has("PrereqCivic")) continue;
-    const extra = [];
-    if (cols.has("PrereqTech")) extra.push(`"PrereqTech"`);
-    if (cols.has("PrereqCivic")) extra.push(`"PrereqCivic"`);
-    if (!extra.length) continue;
-    for (const r of q(ctx, `SELECT "${spec.pk}" AS id, ${extra.join(", ")} FROM "${spec.table}";`)) {
-      if (r.PrereqTech) addEdge(spec.kind, r.id, "technology", r.PrereqTech);
-      if (r.PrereqCivic) addEdge(spec.kind, r.id, "civic", r.PrereqCivic);
-    }
   }
 
   // --- district -> buildings index ----------------------------------------
@@ -3579,11 +3731,6 @@ function buildInstanceData(ctx, args) {
       if (picked.length >= 120) break;
     }
     if (picked.length) byDimension[dim] = picked;
-  }
-
-  const eraIndexOut = {};
-  for (const [era, list] of [...eraIndex.entries()].sort((a, b) => a[0] - b[0])) {
-    eraIndexOut[era] = list;
   }
 
   // --- short descriptions where the formula layer has no sentence ----------
@@ -3623,9 +3770,9 @@ function buildInstanceData(ctx, args) {
     }
   }
 
-  // --- global parameters / great people / operations / boosts -------------
+  // --- global parameters / great people / operations -----------------------
   // Neutral facts: hard-constraint-independent, and previously fetched by hand.
-  const PARAM_HINTS = ["RELIGION_", "TOURISM_", "COMBAT_", "CITY_", "DIPLOMACY_", "GREAT_PERSON", "BELIEF", "PROPHET", "ENHANCE"];
+  const PARAM_HINTS = ["RELIGION_", "TOURISM_", "COMBAT_"];
   const params = hasTable(ctx, "GlobalParameters")
     ? q(ctx, "SELECT Name, Value FROM GlobalParameters ORDER BY Name;")
         .filter((r) => PARAM_HINTS.some((p) => String(r.Name).includes(p)))
@@ -3649,34 +3796,90 @@ function buildInstanceData(ctx, args) {
         .filter(Boolean)
         .map((id) => [id])
     : [];
-  const boostRows = hasTable(ctx, "Boosts")
-    ? q(ctx, "SELECT TechnologyType, CivicType, TriggerDescription FROM Boosts;")
+
+  // --- city-states: environment, not choosable -----------------------------
+  // CityStates carries one row per data layer (base / XP1 / XP2) for the same
+  // civ, so the rows are merged by id and the newest bonus column wins.
+  const cityStateRows = hasTable(ctx, "CityStates")
+    ? q(
+        ctx,
+        "SELECT CivilizationType, CityStateCategory, Name, Bonus, Bonus_XP2 FROM CityStates ORDER BY CivilizationType;",
+      )
     : [];
-  const boostTags = boostRows
-    .map((r) => String(r.TriggerDescription ?? ""))
-    .filter((t) => t.startsWith("LOC_"));
-  const boostLookup = boostTags.length ? localizeMany(ctx, boostTags, "zh_Hans_CN") : () => undefined;
-  const boosts = boostRows
-    .map((r) => [
-      r.TechnologyType ?? r.CivicType ?? null,
-      boostLookup(String(r.TriggerDescription ?? "")) ?? r.TriggerDescription ?? null,
-    ])
-    .filter((r) => r[0] && r[1]);
+  const cityStateById = new Map();
+  for (const r of cityStateRows) {
+    const id = String(r.CivilizationType ?? "");
+    if (!id) continue;
+    const prev = cityStateById.get(id);
+    const bonus = r.Bonus_XP2 ?? r.Bonus ?? null;
+    if (!prev) cityStateById.set(id, { id, category: r.CityStateCategory, name: r.Name, bonus });
+    else {
+      if (!prev.bonus && bonus) prev.bonus = bonus;
+      if (!prev.category && r.CityStateCategory) prev.category = r.CityStateCategory;
+    }
+  }
+  const cityStateList = [...cityStateById.values()];
+  const cityStateTags = cityStateList
+    .flatMap((r) => [r.name, r.bonus])
+    .filter((t) => typeof t === "string" && t.startsWith("LOC_"));
+  const cityStateLookup = cityStateTags.length ? localizeMany(ctx, cityStateTags, "zh_Hans_CN") : () => undefined;
+  const cityStates = cityStateList.map((r) => [
+    r.id,
+    cityStateLookup(String(r.name ?? "")) ?? String(r.name ?? ""),
+    String(r.category ?? ""),
+    cityStateLookup(String(r.bonus ?? "")) ?? (r.bonus ? String(r.bonus) : null),
+  ]);
+
+  // Sanity metric: how many edges are now carried inside rows, not as a graph.
+  let inlineEdges = 0;
+  for (const section of Object.values(content)) {
+    const at = (name) => section.columns.indexOf(name);
+    for (const name of ["req", "tech", "civic"]) {
+      const index = at(name);
+      if (index < 0) continue;
+      for (const row of section.rows) {
+        const value = row[index];
+        if (Array.isArray(value)) inlineEdges += value.length;
+        else if (value) inlineEdges += 1;
+      }
+    }
+  }
 
   return {
     meta: {
       ruleset: source,
       builtAt: build.builtAt ?? effectsMeta.builtAt ?? null,
+      packetVersion: 2,
       encoding: {
-        h: "句柄（t=科技 c=市政 b=建筑 d=区域 u=单位 p=政策 g=政体 bl=信条 i=改良 r=资源 pr=项目 pm=晋升；数字为同类行号）",
+        h: "句柄（t=科技 c=市政 b=建筑 d=区域 u=单位 p=政策 g=政体 bl=信条 i=改良 r=资源 pr=项目 pm=晋升 gv=总督 gp=总督晋升；数字为同类行号），可直接传给 civi6_entity",
+        row: "行 = [h, id, name, era, cost, fx, ...content[kind].columns 第 6 位起]；各 kind 字段不同，按 columns 取，不要按位置猜",
         name: "LOC 标签（由 name_zh 解析）或原名",
-        era: "eras[] 下标",
-        cost: "生产力成本（原表 Cost）",
-        fx: "该实体的可执行公式摘要（由 kb_formula 渲染，最多 3 条）",
+        era: "eras[] 下标（0 基）",
+        cost: "该 kind 的主成本（科技=科技值，市政=文化值，其余=生产力）",
+        fx: "可执行公式摘要（kb_formula 渲染，最多 3 条）",
         d: "fx 为空时的官方描述（≤32 字）",
-        relations: "[子句柄, 前置句柄] 对",
+        req: "前置 id 数组（科技/市政=前置科技/市政；晋升=前置晋升）",
+        boost: "尤里卡/鼓舞触发文本",
+        tech: "解锁科技 id（单位/建筑/区域/政策/项目/改良/资源）",
+        civic: "解锁市政 id",
+        cs: "战斗力",
+        rc: "远程战斗力",
+        mv: "移动力",
+        mt: "维护费",
+        pc: "晋升类",
+        res: "战略资源",
+        py: "允许的购买币种",
+        up: "升级目标单位 id",
+        tier: "政体/政府等级要求",
+        slots: "政体槽位数（按类别）",
+        slot: "政策槽位类别",
+        cls: "类别（信条=创始人/追随者等，晋升=晋升类）",
+        adopt: "信条采纳顺序",
+        lvl: "等级",
+        col: "列",
+        gov: "所属总督 id（权威归属，不看 id 前缀）",
+        cityStates: "[id, 名称, 城邦类型, 宗主加成文本]（环境参考）",
         params: "[GlobalParameters.Name, Value]",
-        boosts: "[tech|civic id, 灵感触发文本]",
       },
       formulaCoverage: effectsMeta.formulaCoverage ?? null,
     },
@@ -3694,19 +3897,20 @@ function buildInstanceData(ctx, args) {
     },
     civKit,
     content,
-    relations,
-    indexes: { era: eraIndexOut, dimension: byDimension, buildingsByDistrict },
+    indexes: { dimension: byDimension, buildingsByDistrict },
+    cityStates,
     omitted: INSTANCE_OMITTED,
+    omittedNote: INSTANCE_OMITTED_NOTE,
+    gaps: INSTANCE_GAPS,
     counts,
     params,
     greatPersonClasses,
     gppBaseCost,
     operations,
-    boosts,
     integrity: {
       rows: Object.values(counts).reduce((a, b) => a + b, 0),
       formulas: formulaRows.length,
-      relations: relations.length,
+      inlineEdges,
     },
   };
 }
@@ -3719,9 +3923,11 @@ function assembleInstanceSection(data, section) {
     meta: data.meta,
     instance: data.instance,
     civKit: data.civKit,
-    relations: data.relations,
     indexes: data.indexes,
+    cityStates: data.cityStates,
     omitted: data.omitted,
+    omittedNote: data.omittedNote,
+    gaps: data.gaps,
     counts: data.counts,
     integrity: data.integrity,
     params: data.params,
@@ -3734,7 +3940,6 @@ function assembleInstanceSection(data, section) {
     const content = {};
     for (const kind of kinds) if (data.content[kind]) content[kind] = data.content[kind];
     sections[name] = { section: name, content };
-    if (name === "content-a") sections[name].boosts = data.boosts;
   }
   const sizes = {};
   for (const [name, value] of Object.entries(sections)) sizes[name] = JSON.stringify(value).length;
@@ -3742,7 +3947,7 @@ function assembleInstanceSection(data, section) {
     sections: sizes,
     next: Object.keys(INSTANCE_SECTIONS).filter((name) => name !== "core"),
     rows: data.integrity.rows,
-    note: "同一回合并行取 core + content-a + content-b + content-c；四片合起来才是完整包。换胜利线不重新取数。",
+    note: "同一回合并行取 core + content-a + content-b + content-c + content-d；五片合起来才是完整包。换胜利线不重新取数。",
   };
   const picked = sections[section];
   if (!picked) {
@@ -3777,7 +3982,7 @@ function instanceTool(getKb) {
   return makeTool({
     name: "civi6_instance",
     description:
-      "Objective-free instance packet, delivered as bounded sections because a single result cannot carry ~90KB. Call it ONCE per instance as ONE parallel step: section='core' + 'content-a' + 'content-b' + 'content-c' — the four together are the full packet (core.manifest lists the sizes and what is still missing). Sections are: core = hard constraints + civ kit + prerequisite edges + neutral indexes (era / yield / district) + GlobalParameters subset + great-person classes + unit operations; content-a = technology, civic, building, district, unit, project (+ boosts); content-b = policy, government, belief; content-c = improvement, resource, promotion. Rows are [handle, id, name, era, cost, fx, d]; read them by handle, and use civi6_eval for arithmetic. Changing victory line does NOT require a re-fetch. A section that would exceed its budget fails loudly instead of being truncated.",
+      "Objective-free instance packet, delivered as bounded sections because a single result cannot carry ~110KB. Call it ONCE per instance as ONE parallel step: section='core' + 'content-a' + 'content-b' + 'content-c' + 'content-d' — the five together are the full packet (core.manifest lists the sizes). Every row is already join'd: [h, id, name, era, cost, fx, ...content[kind].columns from index 6], so unlock (tech/civic), prerequisites (req), unit combat/moves/class/resource, policy slot, belief class, government tier/slots, promotion level/column are inline — read `columns`, never guess a position. There is no SQL tool: this packet plus civi6_eval plus civi6_entity(handle) is the whole data surface. Sections are: core = hard constraints + civ kit (official text + mechanic chain) + yield/district indexes + city-states + GlobalParameters subset + great-person classes + unit operations + gaps/omitted (the only 'this is missing' channel); content-a = unit, district, project; content-b = building, improvement, resource, government; content-c = technology, civic, policy, belief; content-d = promotion, governor, governor_promotion. Use civi6_eval for arithmetic, civi6_entity(handle) only for verbatim text or the full modifier chain. Changing victory line does NOT require a re-fetch. A section that would exceed its budget fails loudly instead of being truncated.",
     parameters: {
       type: "object",
       properties: {
@@ -3787,8 +3992,8 @@ function instanceTool(getKb) {
         difficulty: { type: "string", description: "Difficulty id (optional; listed in instance.difficulties)." },
         section: {
           type: "string",
-          enum: ["core", "content-a", "content-b", "content-c"],
-          description: "Which bounded page of the packet to return. Fetch all four in the same step.",
+          enum: Object.keys(INSTANCE_SECTIONS),
+          description: "Which bounded page of the packet to return. Fetch all five in the same step.",
         },
       },
       required: ["section"],
@@ -3822,6 +4027,49 @@ function kindOfEntityId(id) {
     if (text.startsWith(prefix)) return kind;
   }
   return "other";
+}
+
+/**
+ * Packet handles are 1-letter kind prefixes + the row's index in pk order.
+ * `civi6_entity` accepts them so a row can be drilled without re-deriving its
+ * id or dropping to raw tables. The id list MUST be built with the same sort
+ * as buildInstanceData (pk localeCompare), otherwise handles point elsewhere.
+ */
+const HANDLE_KIND = {
+  t: "technology",
+  c: "civic",
+  b: "building",
+  d: "district",
+  u: "unit",
+  p: "policy",
+  g: "government",
+  bl: "belief",
+  i: "improvement",
+  r: "resource",
+  pr: "project",
+  pm: "promotion",
+  gv: "governor",
+  gp: "governor_promotion",
+};
+const HANDLE_ID_CACHE = new Map();
+
+function entityIdFromHandle(ctx, value) {
+  const match = /^([a-z]{1,2})(\d{1,4})$/.exec(String(value ?? "").trim());
+  if (!match) return undefined;
+  const kind = HANDLE_KIND[match[1]];
+  if (!kind) return undefined;
+  const spec = INSTANCE_KINDS.find((entry) => entry.kind === kind);
+  if (!spec || !hasTable(ctx, spec.table)) return undefined;
+  const key = `${spec.table}|${spec.pk}`;
+  let ids = HANDLE_ID_CACHE.get(key);
+  if (!ids) {
+    ids = q(ctx, `SELECT "${spec.pk}" AS id FROM "${spec.table}";`)
+      .map((row) => String(row.id ?? ""))
+      .filter(Boolean)
+      .sort((a, b) => a.localeCompare(b));
+    HANDLE_ID_CACHE.set(key, ids);
+  }
+  return ids[Number(match[2])];
 }
 
 const COST_CURRENCY = {
@@ -4341,7 +4589,7 @@ function entityTool(getKb) {
   return makeTool({
     name: "civi6_entity",
     description:
-      "Canonical detail for one or more entities: official description, curated stats, localized effects with provenance, and optional raw modifier details. Accepts exact ids (DISTRICT_CAMPUS) or names (学院, resolved automatically); pass ids:[...] to batch (every requested item is returned; oversized batches are compacted, not truncated). effects:'full' returns every effect line; modifiers:'full' adds the raw requirement/argument chain (prefer civi6_modifiers for paging that chain). Units also carry upgrade/resource facts, districts carry buildings[]. For type='governor_promotion', governors[] is the authoritative owner list (from GovernorPromotionSets; never infer it from the id); for type='governor', promotions[] is that governor's kit.",
+      "Canonical detail for one or more entities: official description, curated stats, localized effects with provenance, and optional raw modifier details. Accepts exact ids (DISTRICT_CAMPUS), packet handles (u37 / t72 / bl3 / gp9), or names (学院, resolved automatically); pass ids:[...] to batch (every requested item is returned; oversized batches are compacted, not truncated). Use it for verbatim text and the full modifier chain only — cost, unlock, prerequisites and the deciding stats are already inline in civi6_instance rows. effects:'full' returns every effect line; modifiers:'full' adds the raw requirement/argument chain. Units also carry upgrade/resource facts, districts carry buildings[]. For type='governor_promotion', governors[] is the authoritative owner list (from GovernorPromotionSets; never infer it from the id); for type='governor', promotions[] is that governor's kit.",
     parameters: {
       type: "object",
       properties: {
@@ -4371,8 +4619,9 @@ function entityTool(getKb) {
     execute: (args) => {
       assertNoSource(args);
       const kb = getKb();
-      const ids = Array.isArray(args.ids) && args.ids.length ? args.ids : args.id ? [args.id] : [];
-      if (!ids.length) throw new Error("provide id or ids");
+      const requested = Array.isArray(args.ids) && args.ids.length ? args.ids : args.id ? [args.id] : [];
+      if (!requested.length) throw new Error("provide id or ids");
+      const ids = requested.map((raw) => entityIdFromHandle(kb.ctx, raw) ?? raw);
       const opts = {
         modifiers: args.modifiers === "summary" ? "summary" : args.modifiers === "full" ? "full" : "none",
         effects: args.effects === "full" ? "full" : args.effects === "none" ? "none" : "summary",
@@ -4515,11 +4764,11 @@ function buildReasoningPrompt() {
   return `## Civ6 工作协议（一次取数，公式算账）
 “怎么玩 / 时代规划 / 取舍”类问题，数据只取一次，其余全靠公式与账本。
 
-1. 第 1 步（同一回合并行，四片合起来才是完整数据包）：civi6_instance({ civ, leader, speed, difficulty, section:'core' }) 与 section:'content-a' / 'content-b' / 'content-c'。core.manifest 列出各片体积与还缺哪片；它只由硬约束决定，包含可选项全集（句柄 + 名称 + 时代 + 成本 + 公式摘要）、前置关系、中立索引、GlobalParameters 子集与文明套件全文。换胜利线不重新取数；换文明或速度才重新取。
-2. 包到手后不做探索性取数：按 indexes 定位句柄、按句柄读行。只有需要某实体的官方逐字全文时才调用 civi6_entity 一次。
-3. 算账一律调用 civi6_eval：builds 给供给侧、gates 给需求侧（会展开前置闭包并计成本），返回 ledger（每币种 required / requiredPerTurn / supplyPerTurn / gap / verdict）、cut（砍单与 slipTurns）、scenarios（low/base/high）与 composition（谁贡献了多少，带 fx_id）。禁止心算，禁止把描述文字当数字。
-4. 数据层没有的量（包内 omitted 列出的，如黄金时代/时代得分、伟人个体、真实对手）一律写“数据层未收录”，不得用记忆补。
-5. 答案固定 6 段：约束方程 / 供给计划 / 砍单 / 情景 / 路径 / 验收；每段引用 civi6_eval 字段与句柄，末行“数据依据：BBG 7.5.1 / <entity ids 或句柄>”。`;
+1. 第 1 步（同一回合并行，五片合起来才是完整数据包）：civi6_instance({ civ, leader, speed, difficulty, section:'core' }) 与 section:'content-a' / 'content-b' / 'content-c' / 'content-d'。core.manifest 列出各片体积；它只由硬约束决定，包含文明套件全文、城邦、总督、中立索引、GlobalParameters 子集，以及 gaps/omitted 两张“这里没有”的清单。换胜利线不重新取数；换文明或速度才重新取。
+2. 每行已经连接好，按 content[kind].columns 读，不要按位置猜：解锁科技/市政（tech/civic）、科技与市政前置（req）、单位战斗力/移动/维护/晋升类/战略资源/升级目标（cs/rc/mv/mt/pc/res/up）、政策槽（slot）、信条类别（cls）、政体等级与槽位数（tier/slots）、晋升等级与列（lvl/col）、城邦宗主加成（cityStates）全在行内。数据面只有 instance / eval / entity（外加 meta 溯源），没有 SQL 工具。
+3. 算账一律调用 civi6_eval：builds 给供给侧、gates 给需求侧（会展开前置闭包并计成本），返回 ledger（每币种 required / requiredPerTurn / supplyPerTurn / gap / verdict）、cut（砍单与 slipTurns）、scenarios（low/base/high）与 composition（谁贡献了多少，带 fx_id）。想让某单位/建筑进 plan，就把它的 tech/civic 直接喂给 gates。禁止心算，禁止把描述文字当数字。
+4. 只有两种情况下再用工具：要某实体的官方逐字全文或完整修饰符链时，用 civi6_entity(句柄或 id，可 ids 批量) 取一次；要某个数值确实不在包里时，先查 core.gaps 与 core.omitted——写在那里的一律回答“数据层未收录”，不得用记忆补；两者都没有就是看漏了行，回去按 columns 找。
+5. 答案固定 6 段：约束方程 / 供给计划 / 砍单 / 情景 / 路径 / 验收；每段引用 civi6_eval 字段与行内字段，末行“数据依据：BBG 7.5.1 / <entity ids 或句柄>”。`;
 }
 
 function buildRulesetPrompt(ruleset, build) {
@@ -4692,15 +4941,18 @@ export function apply(ctx, config = {}) {
     });
   }
 
-  // Model-facing surface (5 tools): data once (instance), arithmetic (eval),
-  // verbatim text on demand (entity), audit escape hatch (sql), provenance (meta).
+  // Model-facing surface (4 tools): data once (instance), arithmetic (eval),
+  // verbatim text / full modifier chain on demand (entity), provenance (meta).
+  // `civi6_sql` is deliberately NOT registered: as long as a raw query escape
+  // hatch exists, the packet never has to be good enough — the measured session
+  // (62 SQL calls after a complete 4-section fetch) is the counterexample. The
+  // factory below stays as an internal QA API for verify scripts only.
   // The old exploration surface (plan / search / entities / modifiers / schema)
-  // is no longer registered: it existed to compensate for the missing packet.
+  // is no longer registered either: it existed to compensate for the missing packet.
   ctx.tools.register(metaTool(getKb));
   ctx.tools.register(instanceTool(getKb));
   ctx.tools.register(evalTool(getKb));
   ctx.tools.register(entityTool(getKb));
-  ctx.tools.register(sqlTool(getKb));
 
   ctx.effect(() => () => {
     try {

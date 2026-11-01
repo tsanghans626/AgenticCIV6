@@ -157,17 +157,18 @@ Windows 上插件会保持数据库的只读连接。重建标准库时若文件
 
 ## 插件工具
 
-插件注册 **5 个查询工具**（`civi6_*`），模型面只保留"一次取数 + 公式算账 + 按需全文 + 审计"。**所有工具都没有 `source` 参数**；当前规则由插件配置 `ruleset` 固定。
+插件注册 **4 个查询工具**（`civi6_*`），模型面只有"一次取数 + 公式算账 + 按需全文 + 溯源"。**所有工具都没有 `source` 参数**；当前规则由插件配置 `ruleset` 固定。**模型面没有 SQL 工具**：只要还留着一条能绕开包的原始查询通道，包就不需要合格（见下方"性能设计"里的实测对比）。
 
 | 工具 | 说明 |
 | --- | --- |
 | `civi6_meta` | 当前规则（`ruleset`/`locked`）、构建元信息、实体类型与行数、效果/公式覆盖率、速度档（`speedProfiles`：回合数 / 成本百分比）；`verbose:true` 才返回完整表清单与构建加载顺序 |
-| `civi6_instance` | **唯一取数入口，objective-free**：只由硬约束（文明/领袖/速度/难度）决定，按**分片**交付（单条工具结果被传输层截在 ≈50,000 字符，整包 ≈90KB 必须分页）。同一回合并行取四片才是完整包：`core`（实例参数 + 文明套件全文 + 663 条前置边 + 中立索引 + `params` 全局参数 + 伟人职业/基础成本 + 单位行动）/ `content-a`（科技·市政·建筑·区域·单位·项目 + 灵感触发）/ `content-b`（政策·政体·信条，`fx` 为空时给 `d` 短描述）/ `content-c`（改良·资源·晋升，同上）。`core.manifest` 列出各片体积与还缺哪片；任一分片超 44,000 字符**直接报错**，不交给传输层截断。实测 `core` 36.7KB / `a` 32.7KB / `b` 17.6KB / `c` 20.7KB |
+| `civi6_instance` | **唯一取数入口，objective-free**：只由硬约束（文明/领袖/速度/难度）决定，按**分片**交付（单条工具结果被传输层截在 ≈50,000 字符）。同一回合并行取五片才是完整包：`core`（实例参数 + 文明套件全文 + 城邦 + 中立索引 + `params` + 伟人职业/基础成本 + 单位行动 + `gaps`/`omitted`）/ `content-a`（单位·区域·项目）/ `content-b`（建筑·改良·资源·政体）/ `content-c`（科技·市政·政策·信条）/ `content-d`（晋升·总督·总督晋升）。**每行已经连接好**：`[h,id,name,era,cost,fx, ...content[kind].columns 第 6 位起]`，解锁科技/市政、前置 `req`、单位战斗力/移动/维护/晋升类/战略资源/升级目标、政策槽、信条类别与采纳顺序、政体等级与槽位数、晋升等级/列、总督归属全在行内；没有句柄图要手工 join。`core.manifest` 列出各片体积；任一分片超 44,000 字符**直接报错**，不交给传输层截断。实测 `core` 27.3KB / `a` 26.8KB / `b` 29.0KB / `c` 37.2KB / `d` 28.3KB |
 | `civi6_eval` | **确定性算账**，不取数：供给侧 `builds`（按公式求和，`per=pop/era` 自动乘份数）→ `metrics`（add/percent/supply + 贡献构成）；需求侧 `gates`（展开前置闭包、按币种计成本）→ `ledger`（required/requiredPerTurn/supplyPerTurn/gap/verdict）、`cut`（砍单 + `slipTurns`）、`scenarios`（low/base/high）、`path` 与 `deadline`（`kb_era_window.turn_hi`，保留 confidence） |
-| `civi6_entity` | 实体详情：单 id 或 `ids:[...]` 批量（**不丢请求项**），中文名自动解析；默认效果卡，`effects:'full'` 全部效果，`modifiers:'summary'\|'full'` 才展开原始修饰符链；`governor_promotion` 返回 `governors[]` 归属；`unit` 额外返回 `upgrade`/`resource`，`district` 额外返回 `buildings[]`。**只用于需要官方逐字全文时** |
-| `civi6_sql` | 只读 SQL（仅 SELECT/WITH/EXPLAIN/PRAGMA）的审计逃生口；缺表/缺列时返回候选表与候选列。总督归属查 `v_governor_promotion`，不要按晋升 id 前缀推断 |
+| `civi6_entity` | 实体详情的**放大镜**：单 id、**包内句柄**（`u37`/`t72`/`bl3`/`gp9`）或中文名；`ids:[...]` 批量**不丢请求项**。默认效果卡，`effects:'full'` 全部效果，`modifiers:'summary'\|'full'` 才展开原始修饰符链；`governor_promotion` 返回 `governors[]` 归属；`unit` 额外返回 `upgrade`/`resource`，`district` 额外返回 `buildings[]`。**只用于官方逐字全文与完整修饰符链**——成本、解锁、前置、属性都在 `civi6_instance` 行里 |
 
-已下线的探索面：`civi6_plan` / `civi6_search` / `civi6_entities` / `civi6_modifiers` / `civi6_schema`。它们存在的原因（目标层命中才有数据包、按实体逐次取数）已被 `civi6_instance` 取代；对应内部实现仍作为 QA/预设 API 保留，但不再暴露给模型。
+`civi6_instance` 的两张"这里没有"清单是硬契约：`omitted` 只列数据层确实没有的量（时代得分/黄金时代、伟人个体、自然奇观、巨作清单、未进 `cityStates` 的城邦加成），`gaps` 列包内故意没带的字段（购买价、政策槽数量、OR 型前置、每行 `fx` 第 4 条以后、光环是否叠加）。两者之外，包内一定有一行；写在清单里的一律回答"数据层未收录"，不得用记忆补。
+
+已下线的探索面：`civi6_plan` / `civi6_search` / `civi6_entities` / `civi6_modifiers` / `civi6_schema` / `civi6_sql`。它们存在的原因（目标层命中才有数据包、按实体逐次取数、绕开包直接查库）已被 `civi6_instance` 取代；对应内部实现仍作为 QA/预设 API 保留，但不再暴露给模型。
 
 实体类型：`unit` `building` `district` `civilization` `leader` `trait` `technology` `civic` `policy` `government` `improvement` `resource` `terrain` `feature` `greatperson` `belief` `governor` `governor_promotion` `promotion`。
 
@@ -246,7 +247,7 @@ config:
 1. **执行的 SQL 条数**：语句按 SQL 文本缓存（不再每次 `prepare`），取数改为批量 `IN (...)`。效果卡按 `card_id` 一次点查，不再运行期拼接 Modifier 文本。
 2. **返回体积与完整性**：默认只回策展字段、去掉空列、紧凑 JSON。超过预算时**只压缩审计字段**（`row`/`coverage`/`unresolved`/`modifiers`/`derivations`/`related` 行数），**绝不少返回请求的实体或契约引用的数组**（`items`、`path.onPath`、`budget`、`supply`、`cut`、`scenario`、`eras`）。每次压缩都在 `_budget` 里写明 `limit`、`dropped` 和**该工具真实存在**的恢复参数（`detail`/`view`/`era`/`ids`/`offset`）。
 3. **检索开销**：`search_terms` / `search_postings` / `search_docs.len` 构建期算好，查询只读倒排表；效果文本已加入实体文档，无需二次 join。
-4. **一次取数 + 公式算账**：`civi6_instance` 按硬约束给出 979 行，但**必须分 4 片**（整包 ~90KB 会被传输层截在 ≈50KB，实测两次会话都切在 49,930 字符且 JSON 在 24.8KB 处损坏）。热态首片 ~40ms / ~60 条 SQL，其余分片复用同一份缓存数据。`civi6_eval` 在查询期组合公式（账本/砍单/情景，无取数）。
+4. **一次取数 + 公式算账**：`civi6_instance` 按硬约束给出 1036 行（979 内容 + 8 总督 + 49 总督晋升），**必须分 5 片**（整包 ~148KB 会被传输层截在 ≈50KB，实测两次会话都切在 49,930 字符且 JSON 在 24.8KB 处损坏）。热态首片 ~40ms / ~70 条 SQL，其余分片复用同一份缓存数据。行内已经内联了解锁/前置/属性，所以"什么时候能拿到 X""它比替代品强多少"是一次读行，不是一次 join。`civi6_eval` 在查询期组合公式（账本/砍单/情景，无取数）。
 
 | 会话 | 数据面 | steps | 工具调用 | 输出 token | 墙钟 |
 | --- | --- | --- | --- | --- | --- |
@@ -254,6 +255,9 @@ config:
 | `24f2827c`（分片前：单包 90KB 被截断） | instance ×1（截断）→ sql ×40 / entity ×8 | 31 | 50 | 57,256 | 7.2m |
 | `2f8fada4`（分片前，靠 grep 读 spill 临时文件） | instance ×1（截断）+ grep spill + eval ×3 | 5 | 6 | 8,533 | 51.7s |
 | `6137a841`（分片前模块，改用 kinds 分片） | instance ×4（首片 49,930 溢出后改 kinds 重试）+ eval ×6 | 6 | 11 | 8,867 | 56.3s |
+| `2071e1b3`（分片后：4 片全部到位、0 截断） | instance ×4 + **sql ×62** / entity ×14 / eval ×1 | 31 | 82 | 81,729 | 9.6m |
+
+> 注 3：`2071e1b3` 是"有 SQL 退路"的对照。四片全部到位、没有截断、没有丢实体，SQL 却从 40 涨到 62——其中 11 次查的是包里已有的科技/市政成本与前置，8 次是猜列名失败，15 次在手工拼甲胄光环的修饰符链。结论：**只要还留着原始查询，包再大也不会被当作答案面**。所以 `civi6_sql` 下线，行契约改成内联，见 `git log` 里 "feat(plugin): 去掉 SQL 退路…"。该行也是改造后的对照基线：第 2 步起的数据调用应从 77 降到个位数。
 
 > 注 1：`2f8fada4` 的 51.7s **依赖 grep spill 文件**（模型绕过了截断），是旁路不是结构收益。
 > 注 2：`6137a841` 跑的是**尚未重载的旧模块**（调用参数带 `kinds`、首片仍触发 49,930 溢出即为证据），所以它验证的是"子包恰好 <50KB 时可行"，**不是**分片补丁本身。分片补丁（`section` 必填 + 每片 ≤44KB + 超限报错）已通过直接调用与 `verify-plugin` 断言，端到端复测需重载插件后重跑同一问题。
@@ -277,6 +281,6 @@ Base → Expansion1(迭起兴衰) → Expansion2(风云际会) → 23 个领袖/
 
 - 游戏数据目录仅以只读方式 `readFileSync` 读取。
 - 唯一写入目标是 `data/`（本工作区）：标准库、BBG 库、BBG 源码缓存；不触碰游戏文件。
-- 插件的 `civi6_sql` 以只读方式打开库，并仅放行 `SELECT/WITH/EXPLAIN/PRAGMA`。
+- 插件的数据库连接是只读的；模型面没有 SQL 工具，取数只经由 `civi6_instance` / `civi6_eval` / `civi6_entity` / `civi6_meta`。
 - 严格模式下插件还会拒绝 `pwsh`/`bash` 直接读取 `data/civi6*.sqlite`；维护命令（`npm run build|rebuild|effects:build|reindex|kb:build|verify`）不受影响。
 - BBG 源码为 MIT 许可，仅下载到本地缓存，不随仓库分发。
