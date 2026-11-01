@@ -7,7 +7,7 @@ import { seedDimensions, seedEraWindows, seedSpeedProfiles, seedVictories, ensur
 import { buildAtoms } from "./atoms.js";
 import { buildClosure } from "./closure.js";
 import { buildNodes } from "./node.js";
-import { buildPlans, buildObjectives } from "./engine.js";
+import { buildPlans } from "./engine.js";
 import { buildCivs } from "./civs.js";
 import { buildCards } from "./cards.js";
 import { validateKb, type ValidationReport } from "./validate.js";
@@ -85,7 +85,21 @@ export function buildKb(
   const closure = buildClosure(kb);
   const nodeStats = buildNodes(kb, labeler);
   const engine = buildPlans(kb, { source, rawBuiltAt, builtAt, labeler, specs });
-  const objectiveStats = buildObjectives(kb, { source, rawBuiltAt, builtAt, labeler, specs });
+  // The authored objective layer is retired: data is fetched objective-free
+  // (civi6_instance) and the arithmetic lives in civi6_eval. The kb_objective*
+  // tables are left empty on purpose, so a stale row can never drive an answer.
+  const objectiveStats = {
+    objectives: 0,
+    paths: 0,
+    pathNodes: 0,
+    constraints: 0,
+    focus: 0,
+    supplies: 0,
+    ledger: 0,
+    cuts: 0,
+    scenarios: 0,
+    robustness: 0,
+  };
   const civStats = buildCivs(kb, source, specs, labeler);
   const cards = buildCards(kb, source, builtAt);
   const validation = validateKb(kb, source, specs);

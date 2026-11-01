@@ -36,8 +36,32 @@ function normalizeRuleset(value) {
   throw new Error(`civi6-kb: unknown ruleset "${value}" (expected "vanilla" or "bbg")`);
 }
 
-/** Hard cap on the JSON a single tool call returns to the model (~3k tokens). */
+/**
+ * Hard cap on the JSON a single tool call returns to the model.
+ *
+ * The cap must never change *which facts* the caller asked for: batched entity
+ * fetches keep every requested item and `civi6_plan` keeps every contract-cited
+ * array. Oversized payloads drop audit-only data (raw modifier chains, coverage
+ * blobs, provenance) and compact repeated fields instead, then report what was
+ * dropped plus the exact parameter that restores it. The previous implementation
+ * halved the largest array, which silently dropped half of a batch and half of
+ * the plan path while telling the model to "use a smaller limit" on tools that
+ * have no `limit` parameter.
+ */
 const MAX_OUTPUT_CHARS = 12000;
+export const TOOL_BUDGETS = {
+  entity: 16000,
+  // focus now carries the answer packet (evidence + outline); it is fetched
+  // once per question while replacing dozens of exploratory calls.
+  plan: 32000,
+  eval: 24000,
+  // One bounded page of the instance packet (the transport caps a tool result
+  // at ~50k chars; oversize must be an error, never a silent cut).
+  instance: 44000,
+  search: 8000,
+  sql: 12000,
+  schema: 14000,
+};
 
 // ---------------------------------------------------------------------------
 // Entity specs (mirrors src/entities.ts SPECS). Each entry describes one
@@ -183,6 +207,18 @@ export const SPECS = [
     related: [{ table: "GovernorPromotionSets", fk: "GovernorPromotion" }],
     modifierResolver: "direct",
   },
+  {
+    // Unit promotions are a first-class tree (class -> level -> column), not an
+    // opaque modifier dump: "what does 冲锋 do / what follows it" is a routine
+    // planning question, and the raw tables used to force SQL archaeology.
+    type: "promotion", table: "UnitPromotions", pk: "UnitPromotionType", loc: "LOC_PROMOTION_",
+    stats: ["Level", "Column", "PromotionClass"],
+    related: [
+      { table: "UnitPromotionPrereqs", fk: "UnitPromotion" },
+      { table: "UnitPromotionModifiers", fk: "UnitPromotionType" },
+    ],
+    modifierResolver: "direct",
+  },
 ];
 
 const specByType = new Map(SPECS.map((s) => [s.type, s]));
@@ -199,6 +235,7 @@ const DIRECT_MODIFIER_TABLE = {
   improvement: "ImprovementModifiers",
   belief: "BeliefModifiers",
   governor_promotion: "GovernorPromotionModifiers",
+  promotion: "UnitPromotionModifiers",
 };
 
 /** A few Civ6 tables spell the modifier FK differently. */
@@ -265,6 +302,71 @@ function compactRow(row) {
     if (v === null || v === undefined || v === "") continue;
     out[k] = toJson(v);
   }
+  return out;
+}
+
+/**
+ * Turn a SQLite error into something the caller can act on in the same step:
+ * the tables whose name resembles the missing one, and the columns of the
+ * tables the query already references. A bare "no such column" used to cost a
+ * PRAGMA round trip (a full model step) every time.
+ */
+function sqlErrorPayload(ctx, sql, error) {
+  const message = error instanceof Error ? error.message : String(error);
+  const tableMiss = /no such table:\s*([^\s;]+)/i.exec(message);
+  const columnMiss = /no such column:\s*([^\s;]+)/i.exec(message);
+  const rawToken = tableMiss?.[1] ?? columnMiss?.[1] ?? null;
+  const token = rawToken
+    ? rawToken.replace(/^["'`\[]+|["'`\]]+$/g, "").split(".").pop()
+    : null;
+  const out = {
+    sql,
+    error: message,
+    count: 0,
+    rows: [],
+    hint: columnMiss
+      ? "no such column: use candidates.columns for the tables in this query (names are authoritative)."
+      : "no such table: use candidates.tables, or call civi6_schema with q.",
+  };
+  const candidates = { tables: [] };
+  if (token) {
+    // Exact-miss names are usually one segment off ("UnitUpgradeCosts" vs
+    // "UnitUpgrades"); probe progressively shorter CamelCase prefixes so the
+    // caller gets a usable shortlist instead of an empty list.
+    const probes = new Set([token]);
+    const stripped = token.replace(/(Costs?|Types?|Values?|Tables?|Names?)$/i, "");
+    if (stripped && stripped !== token && stripped.length >= 4) probes.add(stripped);
+    const words = token.match(/[A-Z][A-Za-z0-9]*/g) ?? [];
+    if (words.length >= 2) probes.add(words.slice(0, 2).join(""));
+    if (words.length >= 1 && words[0].length >= 4) probes.add(words[0]);
+    const list = [...probes].slice(0, 4);
+    const likeArgs = list.map((p) => `%${p}%`);
+    const where = list.map(() => "name LIKE ?").join(" OR ");
+    candidates.tables = q(
+      ctx,
+      `SELECT name FROM sqlite_master WHERE type IN ('table','view') AND (${where}) ORDER BY name LIMIT 10;`,
+      ...likeArgs,
+    ).map((r) => r.name);
+    if (columnMiss) {
+      candidates.tablesByColumn = q(
+        ctx,
+        `SELECT name FROM sqlite_master WHERE type = 'table' AND (${list.map(() => "sql LIKE ?").join(" OR ")}) ORDER BY name LIMIT 10;`,
+        ...likeArgs,
+      ).map((r) => r.name);
+    }
+  }
+  const referenced = uniq(
+    [...sql.matchAll(/\b(?:from|join)\s+["'`\[]?([A-Za-z][A-Za-z0-9_]*)/gi)]
+      .map((m) => m[1])
+      .filter((name) => name.toUpperCase() !== "SELECT"),
+  );
+  const columns = {};
+  for (const table of referenced.slice(0, 4)) {
+    if (!hasTable(ctx, table)) continue;
+    columns[table] = q(ctx, `PRAGMA table_info("${table}");`).map((r) => r.name);
+  }
+  if (Object.keys(columns).length) candidates.columns = columns;
+  out.candidates = candidates;
   return out;
 }
 
@@ -383,12 +485,26 @@ function listEntities(ctx, type, opts = {}) {
   const clauses = [];
   const params = [];
   if (opts.q) {
-    clauses.push(`("${spec.pk}" LIKE ? OR "Name" LIKE ?)`);
-    params.push(`%${opts.q}%`, `%${opts.q}%`);
+    // Match the id, the raw (untranslated) name tag and the localized zh/en
+    // name. Without the last arm, q='君主' missed GOVERNMENT_MONARCHY even
+    // though its Chinese name is 天主教君主政体.
+    clauses.push(
+      `("${spec.pk}" LIKE ? OR "Name" LIKE ? OR EXISTS (
+         SELECT 1 FROM LocalizedText lt
+          WHERE lt.Tag = COALESCE("Name", '${spec.loc}' || "${spec.pk}" || '_NAME')
+            AND lt.Language IN ('zh_Hans_CN','en_US')
+            AND lt.Text LIKE ?))`,
+    );
+    const like = `%${opts.q}%`;
+    params.push(like, like, like);
   }
   if (type === "belief" && opts.beliefClass) {
     clauses.push(`"BeliefClassType" = ?`);
     params.push(String(opts.beliefClass));
+  }
+  if (type === "promotion" && opts.promotionClass) {
+    clauses.push(`"PromotionClass" = ?`);
+    params.push(String(opts.promotionClass));
   }
   const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
   const total = q1(ctx, `SELECT COUNT(*) AS n FROM "${spec.table}" ${where};`, ...params)?.n ?? 0;
@@ -782,6 +898,181 @@ function governorPromotionsOf(ctx, governorIds) {
   return out;
 }
 
+/**
+ * District -> buildings: the game links them through Buildings.PrereqDistrict.
+ * A unique district (Hippodrome) has no rows of its own; it inherits the
+ * buildings of the district it replaces (Entertainment Complex), so the union
+ * is what a plan actually builds.
+ */
+function districtBuildings(ctx, districtId) {
+  const replaced = hasTable(ctx, "DistrictReplaces")
+    ? q(ctx, `SELECT ReplacesDistrictType FROM DistrictReplaces WHERE CivUniqueDistrictType = ?;`, districtId)
+        .map((r) => r.ReplacesDistrictType)
+        .filter(Boolean)
+    : [];
+  if (!hasTable(ctx, "Buildings")) return { buildings: [], unique: [], replaced };
+  const ids = uniq([districtId, ...replaced]);
+  const rows = selectIn(
+    ctx,
+    (ph) =>
+      `SELECT BuildingType, Name, Cost, PrereqTech, PrereqCivic, PrereqDistrict FROM Buildings
+        WHERE PrereqDistrict IN (${ph}) ORDER BY Cost, BuildingType;`,
+    ids,
+  );
+  if (!rows.length) return { buildings: [], unique: [], replaced };
+  const tags = rows.map((r) => r.Name ?? `LOC_BUILDING_${r.BuildingType}_NAME`);
+  const zh = localizeMany(ctx, tags, "zh_Hans_CN");
+  const en = localizeMany(ctx, tags, "en_US");
+  // Unique replacements (Tlachtli -> Arena, Thermal Bath -> Zoo) share the same
+  // PrereqDistrict but are not buildable by every civ, so keep them out of the
+  // base chain and list them separately with the building they replace.
+  const uniqueMap = new Map();
+  if (hasTable(ctx, "BuildingReplaces")) {
+    for (const row of selectIn(
+      ctx,
+      (ph) => `SELECT CivUniqueBuildingType, ReplacesBuildingType FROM BuildingReplaces
+                WHERE ReplacesBuildingType IN (${ph});`,
+      uniq(rows.map((r) => r.BuildingType)),
+    )) {
+      uniqueMap.set(row.CivUniqueBuildingType, row.ReplacesBuildingType);
+    }
+  }
+  const shaped = rows.map((r, i) => ({
+    id: r.BuildingType,
+    name: en(tags[i]) ?? r.BuildingType,
+    name_zh: zh(tags[i]) ?? r.BuildingType,
+    cost: r.Cost ?? null,
+    district: r.PrereqDistrict ?? null,
+    prereqTech: r.PrereqTech ?? null,
+    prereqCivic: r.PrereqCivic ?? null,
+    ...(uniqueMap.has(r.BuildingType) ? { replaces: uniqueMap.get(r.BuildingType) } : {}),
+  }));
+  return {
+    replaced,
+    buildings: shaped.filter((b) => !b.replaces),
+    unique: shaped.filter((b) => b.replaces),
+  };
+}
+
+/**
+ * Upgrade chain facts. The raw table only says "UpgradeUnit"; a unique unit
+ * replaces the target, so "重战车 -> 骑士" is incomplete for Byzantium without
+ * exposing the replacement. Upgrade gold is a derived estimate (the game ships
+ * GlobalParameters, not a cost table) and is labelled as such.
+ */
+function unitUpgradeFacts(ctx, id, row) {
+  if (!hasTable(ctx, "UnitUpgrades")) return null;
+  const facts = {};
+  const to = q1(ctx, `SELECT UpgradeUnit FROM UnitUpgrades WHERE Unit = ?;`, id)?.UpgradeUnit ?? null;
+  if (to) facts.to = to;
+  const replacersOf = (unitId) =>
+    hasTable(ctx, "UnitReplaces") && unitId
+      ? q(ctx, `SELECT CivUniqueUnitType FROM UnitReplaces WHERE ReplacesUnitType = ?;`, unitId)
+          .map((r) => r.CivUniqueUnitType)
+          .filter(Boolean)
+      : [];
+  const replacedBy = replacersOf(id);
+  if (replacedBy.length) facts.replacedBy = uniq(replacedBy);
+  const targetReplacedBy = replacersOf(to);
+  const replacedRaw = hasTable(ctx, "UnitReplaces")
+    ? q(ctx, `SELECT ReplacesUnitType FROM UnitReplaces WHERE CivUniqueUnitType = ?;`, id)
+        .map((r) => r.ReplacesUnitType)
+        .filter(Boolean)
+    : [];
+  const sources = uniq([id, ...replacedRaw]);
+  const from = selectIn(ctx, (ph) => `SELECT Unit FROM UnitUpgrades WHERE UpgradeUnit IN (${ph});`, sources)
+    .map((r) => r.Unit)
+    .filter(Boolean);
+  if (from.length) facts.upgradableFrom = uniq(from);
+
+  if (!to) return Object.keys(facts).length ? facts : null;
+  const target = q1(ctx, `SELECT Cost FROM Units WHERE UnitType = ?;`, to);
+  const productionDelta =
+    target?.Cost !== null && target?.Cost !== undefined && row.Cost !== null && row.Cost !== undefined
+      ? target.Cost - row.Cost
+      : null;
+  if (productionDelta !== null) facts.productionDelta = productionDelta;
+
+  let model = null;
+  if (hasTable(ctx, "GlobalParameters")) {
+    const params = Object.fromEntries(
+      q(
+        ctx,
+        `SELECT Name, Value FROM GlobalParameters
+          WHERE Name IN ('UPGRADE_BASE_COST','UPGRADE_NET_PRODUCTION_PERCENT_COST','UPGRADE_MINIMUM_COST');`,
+      ).map((r) => [r.Name, Number(r.Value)]),
+    );
+    const base = params.UPGRADE_BASE_COST;
+    const percentOfNet = params.UPGRADE_NET_PRODUCTION_PERCENT_COST;
+    const minimum = params.UPGRADE_MINIMUM_COST;
+    if ([base, percentOfNet, minimum].every((n) => Number.isFinite(n))) {
+      model = { base, percentOfNet, minimum, source: "GlobalParameters" };
+      facts.goldCostModel = model;
+    }
+  }
+  const estimate = (delta) =>
+    model && delta !== null && delta !== undefined
+      ? Math.max(model.minimum, Math.round(model.base + (delta * model.percentOfNet) / 100))
+      : null;
+  const goldEstimate = estimate(productionDelta);
+  if (goldEstimate !== null) {
+    facts.goldEstimate = goldEstimate;
+    facts.goldEstimateFormula = `${model.base} + ${productionDelta} × ${model.percentOfNet}% (min ${model.minimum})`;
+    facts.goldEstimateAuthority = "derived";
+    facts.goldEstimateConfidence = 0.5;
+  }
+
+  // The upgrade target itself may be replaced by unique units: 重战车 -> 骑士 in
+  // the base rules, but 骑士 is replaced by Mamluk / Mandekalu / Tagma. List the
+  // candidates with their own delta instead of guessing which civ is meant.
+  if (targetReplacedBy.length) {
+    facts.targetReplacedBy = uniq(targetReplacedBy).map((replacerId) => {
+      const replacer = q1(ctx, `SELECT Cost FROM Units WHERE UnitType = ?;`, replacerId);
+      const delta =
+        replacer?.Cost !== null && replacer?.Cost !== undefined && row.Cost !== null && row.Cost !== undefined
+          ? replacer.Cost - row.Cost
+          : null;
+      const entry = {
+        id: replacerId,
+        productionDelta: delta,
+        note: "effective only for the civilization that builds this replacement unique",
+      };
+      const effectiveGold = estimate(delta);
+      if (effectiveGold !== null) entry.goldEstimate = effectiveGold;
+      return entry;
+    });
+  }
+  return Object.keys(facts).length ? facts : null;
+}
+
+/** Strategic-resource cost/maintenance for a unit (Units + Units_XP2). */
+function unitResourceFacts(ctx, id, row) {
+  if (!hasTable(ctx, "Units_XP2")) return null;
+  const xp2 = q1(
+    ctx,
+    `SELECT ResourceCost, ResourceMaintenanceType, ResourceMaintenanceAmount FROM Units_XP2 WHERE UnitType = ?;`,
+    id,
+  );
+  if (!xp2) return null;
+  const type = row.StrategicResource ?? xp2.ResourceMaintenanceType ?? null;
+  const cost = xp2.ResourceCost ?? null;
+  const maintenance = xp2.ResourceMaintenanceAmount ?? null;
+  if (type === null && cost === null) return null;
+  const requiresResource = Boolean(type);
+  return {
+    type,
+    requiresResource,
+    cost,
+    maintenancePerTurn: maintenance,
+    // Some units carry a leftover ResourceCost without a declared strategic
+    // resource. State the data-layer conclusion instead of making the model
+    // chase Units_XP2 with SQL.
+    ...(requiresResource || !cost
+      ? {}
+      : { note: "Units_XP2.ResourceCost 有值但 Units 未声明战略资源；按数据层结论不需要资源，不要推断。" }),
+  };
+}
+
 function getEntityDetail(ctx, type, id, opts = {}) {
   const spec = specByType.get(type);
   if (!spec || !hasTable(ctx, spec.table)) return undefined;
@@ -811,6 +1102,22 @@ function getEntityDetail(ctx, type, id, opts = {}) {
     detail.description = en(descTag) ?? null;
     detail.description_zh = zh(descTag) ?? null;
     detail.description_en = detail.description;
+  }
+
+  // Derived relations that the raw row does not carry but a plan answer needs:
+  // "which buildings does this district give", "what upgrades into/out of this
+  // unit", "what does one upgrade cost". These used to cost the model several
+  // SQL detours per session.
+  if (type === "unit") {
+    const upgrade = unitUpgradeFacts(ctx, id, row);
+    if (upgrade) detail.upgrade = upgrade;
+    const resource = unitResourceFacts(ctx, id, row);
+    if (resource) detail.resource = resource;
+  } else if (type === "district") {
+    const info = districtBuildings(ctx, id);
+    if (info.replaced.length) detail.replaces = info.replaced;
+    if (info.buildings.length) detail.buildings = info.buildings;
+    if (info.unique.length) detail.uniqueBuildings = info.unique;
   }
 
   // The effect card is the canonical, player-facing answer. Keep the raw
@@ -1361,7 +1668,9 @@ function shapeCheck(c) {
     dimension: c.dimension_id,
     band: [c.value_lo, c.value_hi],
     message: c.message,
-    remedy: c.remedy ?? undefined,
+    // NULL remedy must stay JSON (not `undefined`): the host rejects tool
+    // output that is not lossless JSON, which used to break view='check'.
+    remedy: c.remedy ?? null,
     severity: c.severity,
   };
 }
@@ -1522,6 +1831,9 @@ function objectivePayload(ctx, objective) {
     metric: r.metric,
     kind: r.kind,
     ref: r.ref_id,
+    // Names for the supply ledger so the answer can cite "纪念碑" without a
+    // follow-up entity call for BUILDING_MONUMENT.
+    name_zh: entityLabel(ctx, r.kind === "governor" ? "governor_promotion" : r.kind, r.ref_id),
     perTurn: round1(r.per_unit * r.copies),
     copies: r.copies,
     fromTurn: r.from_turn,
@@ -1619,9 +1931,324 @@ function objectivePayload(ctx, objective) {
   };
 }
 
+/**
+ * The answer-facing packet attached to `civi6_plan(view='focus')`.
+ *
+ * Why it exists: the plan layer says "what to build and when", but the answer
+ * still needs the official text of the uniques/beliefs/policies it mentions.
+ * Without it the model re-discovers them with search/SQL and then spends tens
+ * of thousands of reasoning tokens reconciling partial payloads. The brief
+ * inlines the evidence, the mechanics the data layer does model, the remaining
+ * gaps, the answer outline and the explicitly unmodelled topics.
+ */
+const BRIEF_MAX_EVIDENCE = 20;
+const BRIEF_EVIDENCE_KINDS = new Set([
+  "unit",
+  "building",
+  "district",
+  "resource",
+  "policy",
+  "government",
+  "belief",
+  "promotion",
+  "improvement",
+  "trait",
+  "governor_promotion",
+]);
+const BRIEF_UNKNOWN_DEFAULTS = [
+  { topic: "黄金时代决议（Dedications）", status: "unmodeled" },
+  { topic: "其他规则集（原版/其他 mod）的数值", status: "out_of_ruleset" },
+];
+const BRIEF_OUTLINE = [
+  {
+    id: "constraints",
+    title: "约束方程",
+    cite: ["budget[].era", "budget[].metric", "budget[].required", "budget[].supply", "budget[].gap", "budget[].perTurn"],
+  },
+  { id: "supply", title: "供给计划", cite: ["supply[].id", "supply[].kind", "supply[].perTurn", "supply[].fromTurn", "evidence[]"] },
+  { id: "cut", title: "砍单", cite: ["cut[].rank", "cut[].ref", "cut[].saves", "cut[].lose", "cut[].slipTurns"] },
+  { id: "scenario", title: "情景", cite: ["scenario[]", "robustness[]"] },
+  { id: "path", title: "路径", cite: ["path.onPath", "path.detour", "path.dead[].why"] },
+  { id: "acceptance", title: "验收", cite: ["eras[].items[].checkpoint", "eras[].items[].abandonIf"] },
+];
+
+function briefEvidenceCard(ctx, kind, id) {
+  if (!hasTable(ctx, "effect_cards")) return null;
+  return q1(ctx, `SELECT description_zh, effects_json, attributes_json, unresolved_json FROM effect_cards WHERE card_id = ?;`, `${kind}:${id}`);
+}
+
+function briefOutlineMarkdown(payload, evidence) {
+  const lines = [];
+  if (evidence.length) {
+    lines.push("## 0. 机制速查（可并入第 2/5 段；正文逐字引用 brief.evidence[].effects）");
+    for (const e of evidence) lines.push(`- ${e.name_zh}（${e.kind}:${e.id}）`);
+  }
+  lines.push("## 1. 约束方程");
+  const budgets = [...(payload.budget ?? [])].sort((a, b) => b.gap - a.gap);
+  for (const b of budgets) {
+    lines.push(
+      `- ${b.era} ${b.metric}：required ${b.required} / supply ${b.supply} / gap ${b.gap} / perTurn ${JSON.stringify(b.perTurn)}`,
+    );
+  }
+  lines.push("## 2. 供给计划");
+  for (const s of payload.supply ?? []) {
+    lines.push(
+      `- ${s.kind}:${s.ref}（${s.name_zh ?? s.ref}）${s.perTurn}/回合，T${s.fromTurn} 到位（${s.copies} 份）`,
+    );
+  }
+  lines.push("## 3. 砍单");
+  if (!(payload.cut ?? []).length) lines.push("- 无 gap>0，无需砍单");
+  for (const c of payload.cut ?? []) {
+    lines.push(`- #${c.rank} ${c.ref}：省 ${JSON.stringify(c.saves)}，代价 ${c.lose}，推迟 ${c.slipTurns} 回合`);
+  }
+  lines.push("## 4. 情景");
+  for (const s of payload.scenario ?? []) lines.push(`- ${s.id}：${s.label}（feasible=${s.feasible}）`);
+  const invariants = (payload.robustness ?? []).filter((r) => r.invariant).map((r) => r.ref);
+  lines.push(`- invariant：${invariants.join("、") || "无"}`);
+  lines.push("## 5. 路径");
+  lines.push(`- onPath：${(payload.path?.onPath ?? []).map((n) => `${n.kind}:${n.id}`).join(" → ")}`);
+  lines.push(`- detour：${(payload.path?.detour ?? []).map((n) => n.id).join("、") || "无"}`);
+  for (const d of payload.path?.dead ?? []) lines.push(`- dead ${d.id}：${d.why}`);
+  lines.push("## 6. 验收");
+  for (const era of payload.eras ?? []) {
+    for (const item of era.items ?? []) {
+      lines.push(`- ${era.era}：${item.action?.label ?? item.action?.id} → ${item.checkpoint ?? "无 checkpoint"}`);
+    }
+  }
+  return lines.join("\n");
+}
+
+function buildBrief(ctx, objective, payload, civ) {
+  const capsule = parseJson(objective.win_capsule, {}) ?? {};
+  const wanted = [];
+  const seen = new Set();
+  const add = (kind, id, why, priority) => {
+    if (!kind || !id) return;
+    const key = `${kind}:${id}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    wanted.push({ kind, id, why: why ?? null, priority, authored: priority === 0 });
+  };
+
+  for (const item of Array.isArray(capsule.evidence) ? capsule.evidence : []) {
+    add(item?.kind, item?.id, item?.why, 0);
+  }
+  if (civ) {
+    for (const id of parseJsonArray(civ.unique_unit)) add("unit", id, null, 1);
+    for (const id of parseJsonArray(civ.unique_building)) add("building", id, null, 1);
+    for (const id of parseJsonArray(civ.unique_district)) add("district", id, null, 1);
+    for (const id of parseJsonArray(civ.unique_improvement)) add("improvement", id, null, 1);
+    for (const id of parseJsonArray(civ.trait_ids)) add("trait", id, null, 2);
+  }
+  for (const source of payload.supply ?? []) {
+    const kind = source.kind === "governor" ? "governor_promotion" : source.kind;
+    add(kind, source.ref, "供给来源", 3);
+  }
+  for (const node of [...(payload.path?.onPath ?? []), ...(payload.path?.detour ?? [])]) {
+    if (BRIEF_EVIDENCE_KINDS.has(node.kind)) add(node.kind, node.id, null, 4);
+  }
+
+  const ordered = wanted.slice().sort((a, b) => a.priority - b.priority);
+  const selected = ordered.slice(0, BRIEF_MAX_EVIDENCE);
+  const omitted = ordered.slice(BRIEF_MAX_EVIDENCE).map((w) => `${w.kind}:${w.id}`);
+
+  const evidence = selected.map((w) => {
+    const card = briefEvidenceCard(ctx, w.kind, w.id);
+    const effects = card ? parseJsonArray(card.effects_json) : [];
+    const texts = effects.map((e) => e.text_zh ?? e.text_en).filter(Boolean);
+    const attributes = card ? parseJsonArray(card.attributes_json) : [];
+    const unresolved = card ? parseJsonArray(card.unresolved_json) : [];
+    return {
+      kind: w.kind,
+      id: w.id,
+      name_zh: entityLabel(ctx, w.kind, w.id),
+      why: w.why,
+      effects: texts.slice(0, 3),
+      attributes: attributes.slice(0, 6).map((a) => ({
+        key: a.key,
+        label_zh: a.label_zh,
+        value: a.value,
+        unit: a.unit,
+      })),
+      authority: effects[0]?.authority ?? null,
+      dataGap: !card || !texts.length,
+      authored: w.authored,
+      ...(unresolved.length ? { unresolvedCount: unresolved.length } : {}),
+    };
+  });
+  // Auto-derived traits/buildings without official text (internal traits) are
+  // noise; only authored gaps become work for the model.
+  const textless = evidence.filter((e) => e.dataGap && !e.authored).map((e) => `${e.kind}:${e.id}`);
+  const usableEvidence = evidence.filter((e) => !e.dataGap || e.authored);
+  const missing = usableEvidence.filter((e) => e.dataGap).map((e) => `${e.kind}:${e.id}`);
+
+  const mechanics = {};
+  if (hasTable(ctx, "kb_speed_profile")) {
+    const row = q1(ctx, `SELECT speed, total_turns, cost_multiplier FROM kb_speed_profile WHERE speed = ?;`, objective.speed);
+    if (row) mechanics.speed = { totalTurns: row.total_turns, costMultiplier: row.cost_multiplier };
+  }
+  if (hasTable(ctx, "BeliefClasses")) {
+    const rows = q(
+      ctx,
+      `SELECT BeliefClassType, Name, MaxInReligion, AdoptionOrder FROM BeliefClasses
+        ORDER BY AdoptionOrder, BeliefClassType;`,
+    );
+    const zh = localizeMany(ctx, rows.map((r) => r.Name).filter(Boolean), "zh_Hans_CN");
+    mechanics.beliefClasses = rows.map((r) => ({
+      class: r.BeliefClassType,
+      name_zh: zh(r.Name) ?? r.BeliefClassType,
+      maxInReligion: r.MaxInReligion,
+      adoptionOrder: r.AdoptionOrder,
+    }));
+  }
+  if (hasTable(ctx, "Eras")) {
+    mechanics.greatPersonBaseCost = q(
+      ctx,
+      `SELECT EraType, GreatPersonBaseCost FROM Eras
+        WHERE GreatPersonBaseCost IS NOT NULL ORDER BY ChronologyIndex;`,
+    ).map((r) => ({ era: r.EraType, cost: r.GreatPersonBaseCost }));
+  }
+  const districtIds = uniq(
+    [...(payload.path?.onPath ?? []), ...(payload.path?.detour ?? [])]
+      .filter((n) => n.kind === "district")
+      .map((n) => n.id),
+  );
+  if (districtIds.length && hasTable(ctx, "Projects")) {
+    const projects = selectIn(
+      ctx,
+      (ph) => `SELECT ProjectType, Name, Cost, PrereqDistrict FROM Projects
+                WHERE PrereqDistrict IN (${ph}) ORDER BY Cost, ProjectType;`,
+      districtIds,
+    );
+    if (projects.length) {
+      const gpp = hasTable(ctx, "Project_GreatPersonPoints")
+        ? selectIn(
+            ctx,
+            (ph) => `SELECT ProjectType, GreatPersonClassType, Points FROM Project_GreatPersonPoints
+                      WHERE ProjectType IN (${ph});`,
+            projects.map((p) => p.ProjectType),
+          )
+        : [];
+      const byProject = groupBy(gpp, "ProjectType");
+      const tags = projects.map((p) => p.Name ?? `LOC_PROJECT_${p.ProjectType}_NAME`);
+      const zh = localizeMany(ctx, tags, "zh_Hans_CN");
+      mechanics.districtProjects = projects.map((p, i) => ({
+        id: p.ProjectType,
+        name_zh: zh(tags[i]) ?? p.ProjectType,
+        cost: p.Cost ?? null,
+        district: p.PrereqDistrict ?? null,
+        greatPersonPoints: (byProject.get(p.ProjectType) ?? []).map((g) => ({
+          class: g.GreatPersonClassType,
+          points: g.Points,
+        })),
+      }));
+    }
+  }
+
+  const groups = [];
+  if (missing.length) {
+    const byKind = new Map();
+    for (const key of missing) {
+      const [kind, ...rest] = key.split(":");
+      const id = rest.join(":");
+      if (!byKind.has(kind)) byKind.set(kind, []);
+      byKind.get(kind).push(id);
+    }
+    groups.push({
+      id: "evidenceGaps",
+      parallel: true,
+      calls: [...byKind.entries()].map(([kind, ids]) => ({
+        tool: "civi6_entity",
+        args: { type: kind, ids },
+      })),
+    });
+  }
+
+  const unknowns = [];
+  const pushUnknown = (topic, status) => {
+    if (!topic || unknowns.some((u) => u.topic === topic)) return;
+    unknowns.push({ topic, status });
+  };
+  for (const item of BRIEF_UNKNOWN_DEFAULTS) pushUnknown(item.topic, item.status);
+  for (const topic of Array.isArray(capsule.unmodeled) ? capsule.unmodeled : []) pushUnknown(topic, "unmodeled");
+  for (const e of usableEvidence) {
+    if (e.dataGap) pushUnknown(`${e.kind}:${e.id} 无已解析效果文本`, "unresolved");
+  }
+
+  const omittedAll = [...omitted, ...textless];
+  return {
+    coverage: {
+      complete: groups.length === 0 && usableEvidence.length > 0,
+      evidence: usableEvidence.length,
+      missing,
+      ...(omittedAll.length ? { omitted: omittedAll } : {}),
+    },
+    evidence: usableEvidence,
+    mechanics,
+    workPlan: {
+      groups,
+      maxExtraCalls: groups.length ? 1 : 0,
+      stopRule: "coverage.complete=true → 直接作答，不再调用 search/entity/entities/sql/schema",
+    },
+    outline: BRIEF_OUTLINE,
+    outlineMarkdown: briefOutlineMarkdown(payload, usableEvidence),
+    unknowns,
+  };
+}
+
 function round1(n) {
   if (typeof n !== "number" || !Number.isFinite(n)) return 0;
   return Math.round(n * 10) / 10;
+}
+
+/**
+ * Authored objectives keep the assumptions of the plan they were derived from
+ * (`speed: "standard"`) while their burst turn is already scaled to the
+ * requested speed. Surface both facts instead of handing the model a header
+ * that says "standard" next to an online burst turn.
+ */
+function normalizeObjectiveAssumptions(objective) {
+  const assumptions = parseJson(objective.assumptions, {}) ?? {};
+  if (assumptions.speed && assumptions.speed !== objective.speed) {
+    assumptions.basisSpeed = assumptions.speed;
+    assumptions.speed = objective.speed;
+  }
+  return assumptions;
+}
+
+/** Header for an objective-scoped response. Never mixes in the generic plan. */
+function objectiveHeader(ctx, objective, victory, source, difficulty) {
+  const speedProfile = hasTable(ctx, "kb_speed_profile")
+    ? q1(
+        ctx,
+        `SELECT speed, total_turns, cost_multiplier FROM kb_speed_profile WHERE speed = ?;`,
+        objective.speed,
+      )
+    : null;
+  return {
+    id: objective.objective_id,
+    victory,
+    source,
+    civ: objective.civ_id ?? null,
+    leader: objective.leader_id ?? null,
+    speed: objective.speed,
+    burstTurn: objective.burst_turn,
+    burstEra: objective.burst_era,
+    difficulty: difficulty ?? null,
+    summary: objective.title ?? null,
+    assumptions: normalizeObjectiveAssumptions(objective),
+    confidence: objective.confidence ?? null,
+    sourceFlag: objective.source_flag ?? "rule",
+    ...(speedProfile
+      ? {
+          speedProfile: {
+            totalTurns: speedProfile.total_turns,
+            costMultiplier: speedProfile.cost_multiplier,
+            note: "costMultiplier is a percentage of standard cost (online=50).",
+          },
+        }
+      : {}),
+  };
 }
 
 function planResult(ctx, source, opts) {
@@ -1670,20 +2297,55 @@ function planResult(ctx, source, opts) {
   const baseTargets = targets.map((t) => ({ ...t }));
   const civApplied = applyCivToTargets(ctx, source, baseTargets, civ, victory);
 
-  const out = {
-    plan: {
-      id: plan.plan_id,
-      victory,
-      source,
-      burstTurn: plan.burst_turn,
-      burstEra: plan.burst_era,
-      speed,
-      difficulty: plan.difficulty,
-      summary: plan.summary,
-      assumptions: parseJson(plan.assumptions, {}),
-    },
-    query: { view, era: eraId, detail, speed },
+  const basePlan = {
+    id: plan.plan_id,
+    victory,
+    source,
+    // The generic plan is authored at standard speed; `query.speed` says what
+    // the caller asked for. Never relabel the base plan as the requested speed.
+    speed: plan.speed ?? "standard",
+    difficulty: plan.difficulty,
+    burstTurn: plan.burst_turn,
+    burstEra: plan.burst_era,
+    summary: plan.summary,
+    assumptions: parseJson(plan.assumptions, {}),
   };
+  // An objective-scoped response must not carry a second, contradictory header
+  // (base plan T235 vs objective T65); the base plan only survives as a label.
+  const speedProfileRow = hasTable(ctx, "kb_speed_profile")
+    ? q1(
+        ctx,
+        `SELECT speed, total_turns, cost_multiplier FROM kb_speed_profile WHERE speed = ?;`,
+        speed,
+      )
+    : null;
+  const out = {
+    plan: objective ? objectiveHeader(ctx, objective, victory, source, plan.difficulty) : basePlan,
+    query: {
+      view,
+      era: eraId,
+      detail,
+      speed,
+      ...(speedProfileRow
+        ? {
+            speedProfile: {
+              totalTurns: speedProfileRow.total_turns,
+              costMultiplier: speedProfileRow.cost_multiplier,
+            },
+          }
+        : {}),
+    },
+  };
+  if (objective && (view === "burst" || view === "all")) {
+    // The generic plan is a label for the horizontal slice; a focus/check/ladder
+    // answer is fully described by the objective header.
+    out.basePlan = {
+      id: basePlan.id,
+      burstTurn: basePlan.burstTurn,
+      burstEra: basePlan.burstEra,
+      summary: basePlan.summary,
+    };
+  }
 
   if (view === "focus") {
     if (!objective) {
@@ -1701,6 +2363,16 @@ function planResult(ctx, source, opts) {
     out.scenario = payload.scenario;
     out.robustness = payload.robustness;
     out.eras = payload.eras;
+    // Self-sufficient answer packet: evidence + mechanics + remaining gaps +
+    // outline + explicit unknowns. This is what removes the 20+ exploratory
+    // calls and the final-step re-derivation.
+    out.brief = buildBrief(ctx, objective, payload, civ);
+    out.checks = q(
+      ctx,
+      `SELECT era_id, turn_lo, turn_hi, dimension_id, value_lo, value_hi, message, remedy, severity
+         FROM kb_check WHERE plan_id = ? ORDER BY priority, turn_lo LIMIT 6;`,
+      planId,
+    ).map(shapeCheck);
   } else if (objective) {
     // Every other view carries the constraint summary so the answer can cite
     // constraint ids without a second call.
@@ -1833,7 +2505,11 @@ function planResult(ctx, source, opts) {
     ...objectiveRefs,
     ...civApplied.targets.filter((t) => t.entity_id).map((t) => t.entity_id),
   ]).slice(0, 80);
-  if (detail === "full") {
+  // Derivations belong to the generic plan (`domination:bbg`). Attaching them to
+  // an objective-scoped focus response used to push the payload over budget,
+  // after which the trimming logic halved `path.onPath` and hid half the civic
+  // chain. Keep them only where the generic plan is what the caller asked for.
+  if (detail === "full" && (!objective || view === "burst" || view === "all")) {
     out.derivations = q(
       ctx,
       `SELECT slice_kind, era_id, output_dimension_id, expression, value, unit, confidence
@@ -1875,6 +2551,21 @@ function planResult(ctx, source, opts) {
 // ---------------------------------------------------------------------------
 // Knowledge base facade
 // ---------------------------------------------------------------------------
+/**
+ * Default meta is a ruleset + coverage summary, not a build log. The per-DLC
+ * load order and the skipped-file list were ~5.5k of the 8k payload the model
+ * had to read just to learn "bbg / locked".
+ */
+function slimBuild(build) {
+  if (!build || typeof build !== "object") return build;
+  const { loadOrder, ...rest } = build;
+  if (rest.bbg && typeof rest.bbg === "object") {
+    const { skipped, warnings, files, statements, textEntries, ...bbg } = rest.bbg;
+    rest.bbg = bbg;
+  }
+  return rest;
+}
+
 export function createKnowledgeBase(dbPath, sourceName = "vanilla") {
   if (!isAbsolute(dbPath)) dbPath = resolve(dbPath);
   let stat = null;
@@ -1915,16 +2606,27 @@ export function createKnowledgeBase(dbPath, sourceName = "vanilla") {
 
     const stats = ctx.statsCache;
     const entityTypes =
-      stats?.entityTypes ??
+      stats?.entityTypes?.map((t) => ({ ...t })) ??
       SPECS.map((s) => ({
         type: s.type,
         table: s.table,
         count: hasTable(ctx, s.table) ? (q1(ctx, `SELECT COUNT(*) AS n FROM "${s.table}";`)?.n ?? 0) : 0,
       }));
+    // The cached stats blob predates any newly added entity type; never hide a
+    // type the plugin can actually serve.
+    const knownTypes = new Set(entityTypes.map((t) => t.type));
+    for (const spec of SPECS) {
+      if (knownTypes.has(spec.type)) continue;
+      entityTypes.push({
+        type: spec.type,
+        table: spec.table,
+        count: hasTable(ctx, spec.table) ? (q1(ctx, `SELECT COUNT(*) AS n FROM "${spec.table}";`)?.n ?? 0) : 0,
+      });
+    }
     const tables = stats?.tables ?? [];
 
     const out = {
-      build,
+      build: opts.verbose ? build : slimBuild(build),
       dbFile: dbPath,
       dataSource: sourceName,
       locked: true,
@@ -1989,6 +2691,20 @@ export function createKnowledgeBase(dbPath, sourceName = "vanilla") {
     } else {
       out.kb = null;
     }
+    if (hasTable(ctx, "kb_speed_profile")) {
+      out.speedProfiles = q(
+        ctx,
+        `SELECT speed, label_zh, total_turns, cost_multiplier, source_table
+           FROM kb_speed_profile ORDER BY total_turns;`,
+      ).map((r) => ({
+        speed: r.speed,
+        label: r.label_zh,
+        totalTurns: r.total_turns,
+        costMultiplier: r.cost_multiplier,
+        source: r.source_table,
+        note: "costMultiplier is a percentage of standard cost (online=50).",
+      }));
+    }
     if (opts.verbose) out.tables = tables;
     return out;
   }
@@ -2010,6 +2726,30 @@ export function createKnowledgeBase(dbPath, sourceName = "vanilla") {
     /** Structured decision slice: victory + era/civ -> targets, budgets, checks. */
     plan(opts = {}) {
       return planResult(ctx, sourceName, opts);
+    },
+
+    /**
+     * One bounded page of the objective-free instance packet. Pass
+     * section:'all' only in tests to get every page merged (the model never
+     * needs it: four parallel calls are the contract).
+     */
+    instance(opts = {}) {
+      const section = String(opts?.section ?? "core");
+      if (section !== "all") return buildInstanceSection(ctx, opts ?? {}, section);
+      const pages = ["core", "content-a", "content-b", "content-c"].map((name) =>
+        buildInstanceSection(ctx, opts ?? {}, name),
+      );
+      const merged = { ...pages[0], content: {} };
+      for (const page of pages) {
+        Object.assign(merged.content, page.content ?? {});
+        if (page.boosts) merged.boosts = page.boosts;
+      }
+      return merged;
+    },
+
+    /** Deterministic formula scratchpad (no data fetch). */
+    eval(opts = {}) {
+      return buildEvalResult(ctx, opts ?? {});
     },
 
     search(query, opts = {}) {
@@ -2087,8 +2827,80 @@ export function createKnowledgeBase(dbPath, sourceName = "vanilla") {
         finalSql = `${body} LIMIT ?`;
         params.push(lim);
       }
-      const rows = q(ctx, finalSql, ...params).map(compactRow);
-      return { sql: trimmed, count: rows.length, rows };
+      try {
+        const rows = q(ctx, finalSql, ...params).map(compactRow);
+        return { sql: trimmed, count: rows.length, rows };
+      } catch (error) {
+        // A missing table/column is a discovery question, not a dead end: the
+        // caller gets candidates and columns and can fix the query next step.
+        return sqlErrorPayload(ctx, trimmed, error);
+      }
+    },
+
+    /** Table/view catalog: names, row counts and column names for SQL writing. */
+    schema(opts = {}) {
+      const limit = clampInt(opts.limit, 8, 1, 40);
+      const term = String(opts.q ?? "").trim();
+      const columnsOf = (table) =>
+        q(ctx, `PRAGMA table_info("${table}");`).map((c) => ({
+          name: c.name,
+          type: c.type || null,
+          pk: !!c.pk,
+        }));
+      const rowCount = (table) => q1(ctx, `SELECT COUNT(*) AS n FROM "${table}";`)?.n ?? 0;
+      if (!term) {
+        const rows = q(
+          ctx,
+          `SELECT name, type FROM sqlite_master WHERE type IN ('table','view')
+            ORDER BY CASE type WHEN 'table' THEN 0 ELSE 1 END, name LIMIT 20;`,
+        );
+        return {
+          query: null,
+          count: rows.length,
+          tables: rows.map((r) => ({ name: r.name, type: r.type, rows: rowCount(r.name) })),
+          note: "shortlist only; pass q to get columns (table-name matches get full columns, column matches get only the matched columns).",
+        };
+      }
+
+      const like = `%${term}%`;
+      const lower = term.toLowerCase();
+      const tables = [];
+      const seen = new Set();
+      const nameRows = q(
+        ctx,
+        `SELECT name, type FROM sqlite_master WHERE type IN ('table','view') AND name LIKE ?
+          ORDER BY CASE type WHEN 'table' THEN 0 ELSE 1 END, name LIMIT ?;`,
+        like,
+        limit,
+      );
+      for (const r of nameRows) {
+        if (tables.length >= limit) break;
+        seen.add(r.name);
+        tables.push({ name: r.name, type: r.type, rows: rowCount(r.name), columns: columnsOf(r.name) });
+      }
+      // Column-first lookup: "where is ResourceCost?" must not require a second
+      // PRAGMA round trip. Only the matched columns are returned for these.
+      if (tables.length < limit) {
+        const sqlRows = q(
+          ctx,
+          `SELECT name FROM sqlite_master WHERE type = 'table' AND sql LIKE ? ORDER BY name LIMIT 30;`,
+          like,
+        );
+        for (const r of sqlRows) {
+          if (tables.length >= limit) break;
+          if (seen.has(r.name)) continue;
+          const matchedColumns = columnsOf(r.name).filter((c) => c.name.toLowerCase().includes(lower));
+          if (!matchedColumns.length) continue;
+          seen.add(r.name);
+          tables.push({ name: r.name, type: "table", rows: rowCount(r.name), matchedColumns });
+        }
+      }
+      return {
+        query: term,
+        count: tables.length,
+        tables,
+        note: "table-name matches show full columns; column matches show only matchedColumns. Use civi6_sql once the name is known.",
+      };
     },
 
     close() {
@@ -2113,56 +2925,112 @@ const BELIEF_CLASSES = [
 ];
 
 /**
- * Serialize with a hard size budget. Oversized payloads lose trailing array
- * entries (and say so) instead of being cut mid-JSON.
+ * Make a payload lossless-JSON safe: `undefined` properties are removed and
+ * non-finite numbers become null. The host rejects tool output that contains
+ * `undefined`, which is how `civi6_plan(view='check')` failed on any row whose
+ * `remedy` was NULL.
  */
-function largestArray(value) {
-  let best = null;
-  const walk = (node) => {
-    if (!node || typeof node !== "object") return;
-    for (const [key, child] of Object.entries(node)) {
-      if (Array.isArray(child)) {
-        if (child.length > 1 && (!best || child.length > best.value.length)) {
-          best = { container: node, key, value: child };
-        }
-      } else if (child && typeof child === "object") {
-        walk(child);
-      }
-    }
-  };
-  walk(value);
-  return best;
+function sanitizeJson(value) {
+  if (value === undefined) return null;
+  if (typeof value === "number") return Number.isFinite(value) ? value : null;
+  if (typeof value === "bigint") return value.toString();
+  if (value === null || typeof value !== "object") return value;
+  if (Array.isArray(value)) return value.map(sanitizeJson);
+  const out = {};
+  for (const [key, child] of Object.entries(value)) {
+    if (child === undefined) continue;
+    out[key] = sanitizeJson(child);
+  }
+  return out;
 }
 
-function fitPayload(value) {
+function jsonLength(value) {
+  return JSON.stringify(value).length;
+}
+
+/**
+ * Attach the budget report. `dropped` names every field that was compacted so
+ * the model can ask for it back explicitly; `recover` is the parameter that
+ * actually exists on the tool that produced the payload.
+ */
+function finalizePayload(value, { budget, dropped, recover }) {
+  if (dropped.length) {
+    value._budget = {
+      limit: budget,
+      dropped: [...new Set(dropped)],
+      recover,
+    };
+  }
   const text = JSON.stringify(value);
-  if (text.length <= MAX_OUTPUT_CHARS) return text;
-
-  // Shrink the largest nested array until the JSON fits. Keeping valid JSON is
-  // more useful to the model than a mid-string cut, and this works for both
-  // flat tool payloads and nested plan slices (`burst.blocking`, `ladder[i]`).
-  let clone;
-  try {
-    clone = JSON.parse(text);
-  } catch {
-    return `${text.slice(0, MAX_OUTPUT_CHARS)}…(truncated)`;
-  }
-  let out = text;
-  for (let guard = 0; guard < 40; guard++) {
-    const best = largestArray(clone);
-    if (!best) break;
-    const keep = Math.max(1, Math.floor(best.value.length / 2));
-    best.container[best.key] = best.value.slice(0, keep);
-    clone.truncated = true;
-    clone.note = `输出超过 ${MAX_OUTPUT_CHARS} 字符预算，已按数组截断；用更小的 limit 或更精确的查询取剩余部分`;
-    out = JSON.stringify(clone);
-    if (out.length <= MAX_OUTPUT_CHARS) return out;
-  }
-  return `${out.slice(0, MAX_OUTPUT_CHARS)}…(truncated)`;
+  if (text.length <= budget) return text;
+  value._budget = {
+    ...(value._budget ?? {}),
+    over: true,
+    note:
+      `载荷 ${text.length} 字符，超过预算 ${budget}；已无可丢弃的审计字段，` +
+      `不再裁剪请求的数据。${recover}`,
+  };
+  return JSON.stringify(value);
 }
 
-function textBlock(value) {
-  return [{ type: "text", text: fitPayload(value) }];
+/**
+ * Serialize within `budget` without losing caller-requested data.
+ *
+ * `compact(clone, level)` is supplied by each tool and must only remove
+ * audit/repeated fields, never whole requested items. Levels are cumulative.
+ */
+function fitPayload(value, opts = {}) {
+  const budget = opts.budget ?? MAX_OUTPUT_CHARS;
+  const clean = sanitizeJson(value);
+  let text = JSON.stringify(clean);
+  if (text.length <= budget) return text;
+  if (!opts.compact) {
+    return finalizePayload(clean, { budget, dropped: ["payload over budget"], recover: opts.recover ?? "" });
+  }
+  const clone = JSON.parse(text);
+  const dropped = [];
+  for (let level = 1; level <= 3; level++) {
+    dropped.push(...(opts.compact(clone, level) ?? []));
+    // Reserve room for the `_budget` report itself (~0.5k): the report must not
+    // be what pushes an otherwise-fitting payload over the limit.
+    if (jsonLength(clone) <= budget - 900) break;
+  }
+  return finalizePayload(clone, { budget, dropped, recover: opts.recover ?? "" });
+}
+
+function textBlock(value, def) {
+  return [
+    {
+      type: "text",
+      text: fitPayload(value, {
+        budget: def?.budget ?? MAX_OUTPUT_CHARS,
+        compact: def?.compact,
+        recover: def?.recover,
+      }),
+    },
+  ];
+}
+
+/**
+ * Per-session work budget, set by a complete `civi6_plan(view='focus')` brief.
+ * It is a visible counter, not a gate: every follow-up tool result carries
+ * `_workBudget` so the model can see how far past the plan it is. A hard gate
+ * is intentionally left out until a probe shows the counter is ignored.
+ */
+let WORK_STATE = null;
+
+function workBudgetNote() {
+  if (!WORK_STATE?.complete) return null;
+  const softCap = WORK_STATE.maxExtraCalls + 2;
+  const remaining = Math.max(0, softCap - WORK_STATE.extraCalls);
+  return {
+    extraCalls: WORK_STATE.extraCalls,
+    remaining,
+    note:
+      remaining > 0
+        ? "brief.coverage.complete；除非 workPlan.groups 要求，直接作答。"
+        : "brief 已完整覆盖；请停止取数，按 brief.outlineMarkdown 作答。",
+  };
 }
 
 function makeTool(def) {
@@ -2172,19 +3040,256 @@ function makeTool(def) {
     parameters: def.parameters,
     output: {
       schema: { type: "object", additionalProperties: true },
-      render: (_args, value) => textBlock(value),
+      render: (_args, value) => textBlock(value, def),
     },
     async execute(args) {
-      return def.execute(args ?? {});
+      const value = sanitizeJson(await def.execute(args ?? {}));
+      if (
+        WORK_STATE?.complete &&
+        !["civi6_plan", "civi6_meta"].includes(def.name) &&
+        value &&
+        typeof value === "object" &&
+        !Array.isArray(value)
+      ) {
+        WORK_STATE.extraCalls += 1;
+        value._workBudget = workBudgetNote();
+      }
+      return value;
     },
   };
+}
+
+function asItems(value) {
+  if (Array.isArray(value?.items)) return value.items;
+  return value && typeof value === "object" ? [value] : [];
+}
+
+/** Entity payload compaction: audit fields and repeated rows go before items. */
+function compactEntityPayload(value, level) {
+  const dropped = [];
+  for (const item of asItems(value)) {
+    if (!item || typeof item !== "object") continue;
+    if (level === 1) {
+      for (const key of ["coverage", "unresolved", "unresolvedCount", "effectBuiltAt", "rulesetId"]) {
+        if (key in item) {
+          delete item[key];
+          dropped.push(`items[].${key}`);
+        }
+      }
+      for (const effect of item.effects ?? []) {
+        if (effect.source) delete effect.source;
+        if (effect.text_en) delete effect.text_en;
+      }
+      if (item.description && item.description === item.description_en) delete item.description;
+      if (item.related && typeof item.related === "object") {
+        for (const [table, rows] of Object.entries(item.related)) {
+          if (Array.isArray(rows) && rows.length > 3) {
+            item.related[table] = rows.slice(0, 3);
+            dropped.push(`related.${table}>3`);
+          }
+        }
+      }
+      if (Array.isArray(item.modifiers) && item.modifiers.length > 12) {
+        item.modifiers = item.modifiers.slice(0, 12);
+        dropped.push("modifiers>12");
+      }
+    } else if (level === 2) {
+      if (item.related && typeof item.related === "object") {
+        for (const [table, rows] of Object.entries(item.related)) {
+          if (Array.isArray(rows) && rows.length > 1) {
+            item.related[table] = rows.slice(0, 1);
+            dropped.push(`related.${table}>1`);
+          }
+        }
+      }
+      if (Array.isArray(item.effects) && item.effects.length > 4) {
+        item.effects = item.effects.slice(0, 4);
+        dropped.push("effects>4");
+      }
+      if (Array.isArray(item.modifiers) && item.modifiers.length > 4) {
+        item.modifiers = item.modifiers.slice(0, 4);
+        dropped.push("modifiers>4");
+      }
+      // Raw row and curated attributes overlap; keep the curated view only.
+      if (item.row && Array.isArray(item.attributes) && item.attributes.length) {
+        delete item.row;
+        dropped.push("row");
+      }
+    } else if (level === 3) {
+      if (Array.isArray(item.effects) && item.effects.length > 1) {
+        item.effects = item.effects.slice(0, 1);
+        dropped.push("effects>1");
+      }
+      if (Array.isArray(item.modifiers)) {
+        delete item.modifiers;
+        dropped.push("modifiers");
+      }
+      // `upgrade`/`resource`/`buildings` carry the relations the answer needs;
+      // the raw related rows are audit data by this point.
+      if (item.related) {
+        delete item.related;
+        dropped.push("related");
+      }
+      if (item.description_en) {
+        delete item.description_en;
+        dropped.push("description_en");
+      }
+    }
+  }
+  return dropped;
+}
+
+/** Plan payload compaction: provenance and duplicate headers go before facts. */
+function compactPlanPayload(value, level) {
+  const dropped = [];
+  if (level === 1) {
+    if (value.derivations) {
+      delete value.derivations;
+      dropped.push("derivations");
+    }
+    if (value.civ?.deltas?.length) {
+      value.civ.deltas = [];
+      dropped.push("civ.deltas");
+    }
+    if (Array.isArray(value.refs) && value.refs.length > 24) {
+      value.refs = value.refs.slice(0, 24);
+      dropped.push("refs>24");
+    }
+    for (const era of value.eras ?? []) {
+      for (const item of era.items ?? []) {
+        if (item.source !== undefined) {
+          delete item.source;
+          dropped.push("eras[].items[].source");
+        }
+      }
+    }
+    for (const c of value.objective?.constraints ?? []) {
+      if (c.waivedBy !== undefined) {
+        delete c.waivedBy;
+        dropped.push("objective.constraints[].waivedBy");
+      }
+    }
+  } else if (level === 2) {
+    if (value.civ) {
+      delete value.civ;
+      dropped.push("civ");
+    }
+    if (Array.isArray(value.robustness) && value.robustness.length > 6) {
+      value.robustness = value.robustness.slice(0, 6);
+      dropped.push("robustness>6");
+    }
+    if (Array.isArray(value.path?.detour) && value.path.detour.length > 6) {
+      value.path.detour = value.path.detour.slice(0, 6);
+      dropped.push("path.detour>6");
+    }
+  } else if (level === 3) {
+    if (value.basePlan) {
+      delete value.basePlan;
+      dropped.push("basePlan");
+    }
+    if (value.counts) {
+      delete value.counts;
+      dropped.push("counts");
+    }
+  }
+  return dropped;
+}
+
+function compactSearchPayload(value, level) {
+  const dropped = [];
+  const results = value.results ?? [];
+  let clipped = false;
+  const clip = (rows) =>
+    rows.map((r) => {
+      if (r.snippet && r.snippet.length > 240) {
+        clipped = true;
+        return { ...r, snippet: `${r.snippet.slice(0, 240)}…` };
+      }
+      return r;
+    });
+  const caps = { 1: 10, 2: 6, 3: 3 };
+  const cap = caps[level];
+  value.results = clip(results).slice(0, cap);
+  if (results.length > cap) dropped.push(`results>${cap}`);
+  if (clipped) dropped.push("snippet>240");
+  return dropped;
+}
+
+function compactRowsPayload(value, level) {
+  const dropped = [];
+  const caps = { 1: 50, 2: 20, 3: 5 };
+  const cap = caps[level];
+  if (Array.isArray(value.rows) && value.rows.length > cap) {
+    value.rows = value.rows.slice(0, cap);
+    dropped.push(`rows>${cap}`);
+  }
+  if (Array.isArray(value.modifiers) && value.modifiers.length > cap) {
+    value.modifiers = value.modifiers.slice(0, cap);
+    dropped.push(`modifiers>${cap}`);
+  }
+  return dropped;
+}
+
+function compactSchemaPayload(value, level) {
+  const dropped = [];
+  const caps = { 1: 20, 2: 10, 3: 5 };
+  const cap = caps[level];
+  if (Array.isArray(value.tables) && value.tables.length > cap) {
+    value.tables = value.tables.slice(0, cap);
+    dropped.push(`tables>${cap}`);
+  }
+  return dropped;
+}
+
+/** One place per tool family: budget, compaction ladder and recovery hint. */
+const RENDER = {
+  entity: {
+    budget: TOOL_BUDGETS.entity,
+    compact: compactEntityPayload,
+    recover: "items are never dropped; ask again with effects:'none' or modifiers:'none', or split ids.",
+  },
+  plan: {
+    budget: TOOL_BUDGETS.plan,
+    compact: compactPlanPayload,
+    recover: "Use detail:'summary' (complete) or view:'ladder' with era:'ancient'...'information'.",
+  },
+  search: {
+    budget: TOOL_BUDGETS.search,
+    compact: compactSearchPayload,
+    recover: "Narrow with type or a shorter q, or lower limit.",
+  },
+  sql: {
+    budget: TOOL_BUDGETS.sql,
+    compact: compactRowsPayload,
+    recover: "Add a WHERE clause or a smaller LIMIT.",
+  },
+  modifiers: {
+    budget: TOOL_BUDGETS.entity,
+    compact: compactRowsPayload,
+    recover: "Page with offset/limit.",
+  },
+  schema: {
+    budget: TOOL_BUDGETS.schema,
+    compact: compactSchemaPayload,
+    recover: "Narrow q or lower limit.",
+  },
+};
+
+/**
+ * Exported for scripts/verify-plugin.mjs: apply the same budget contract the
+ * model sees, without needing a host tool context.
+ */
+export function renderToolPayload(kind, value) {
+  const config = RENDER[kind];
+  if (!config) return fitPayload(value);
+  return fitPayload(value, config);
 }
 
 function metaTool(getKb) {
   return makeTool({
     name: "civi6_meta",
     description:
-      "Active Civilization VI ruleset, build provenance, entity types and effect coverage. Cheap; call once per session. Pass verbose:true only when the full table inventory is needed.",
+      "Active Civilization VI ruleset, build provenance, entity types and effect coverage, plus speedProfiles (total turns and cost multiplier per speed). Cheap; call once per session. Pass verbose:true only when you also need the full table list and the build load order.",
     parameters: {
       type: "object",
       properties: {
@@ -2199,15 +3304,896 @@ function metaTool(getKb) {
   });
 }
 
+/**
+ * Objective-free instance packet.
+ *
+ * Hard constraints (civ / leader / speed / difficulty) decide what is fetched;
+ * the victory line never does. Everything choosable is listed once with its
+ * executable formula summary, plus neutral indexes so the model can locate a
+ * row by era / yield / district instead of reading all of them.
+ */
+const INSTANCE_KINDS = [
+  { kind: "technology", handle: "t", table: "Technologies", pk: "TechnologyType", name: "Name", era: "EraType", cost: "Cost" },
+  { kind: "civic", handle: "c", table: "Civics", pk: "CivicType", name: "Name", era: "EraType", cost: "Cost" },
+  { kind: "building", handle: "b", table: "Buildings", pk: "BuildingType", name: "Name", era: null, cost: "Cost" },
+  { kind: "district", handle: "d", table: "Districts", pk: "DistrictType", name: "Name", era: null, cost: "Cost" },
+  { kind: "unit", handle: "u", table: "Units", pk: "UnitType", name: "Name", era: null, cost: "Cost" },
+  { kind: "policy", handle: "p", table: "Policies", pk: "PolicyType", name: "Name", era: null, cost: null },
+  { kind: "government", handle: "g", table: "Governments", pk: "GovernmentType", name: "Name", era: null, cost: null },
+  { kind: "belief", handle: "bl", table: "Beliefs", pk: "BeliefType", name: "Name", era: null, cost: null },
+  { kind: "improvement", handle: "i", table: "Improvements", pk: "ImprovementType", name: "Name", era: null, cost: null },
+  { kind: "resource", handle: "r", table: "Resources", pk: "ResourceType", name: "Name", era: null, cost: null },
+  { kind: "project", handle: "pr", table: "Projects", pk: "ProjectType", name: "Name", era: null, cost: "Cost" },
+  { kind: "promotion", handle: "pm", table: "UnitPromotions", pk: "UnitPromotionType", name: "Name", era: null, cost: null },
+];
+
+const INSTANCE_OMITTED = [
+  { what: "时代得分 / 黄金时代与决议", reason: "规则库无对应表（数据层未收录）" },
+  { what: "伟人个体名单与抢人顺序", reason: "个体伟人不在本包；只给伟人职业与基础成本" },
+  { what: "城邦 / 对手文明", reason: "不可选，属于外部环境" },
+  { what: "自然奇观 / 地貌 / 地形", reason: "不可主动选择" },
+  { what: "巨作清单", reason: "由巨作槽与伟人产出间接决定" },
+];
+
+function tableColumnsOf(ctx, table) {
+  try {
+    return new Set(q(ctx, `PRAGMA table_info("${table}");`).map((r) => r.name));
+  } catch {
+    return new Set();
+  }
+}
+
+/**
+ * Sections exist because the transport cuts a single tool result at ~50k chars:
+ * the full packet is ~90k, so it must arrive as a checklist of bounded pages the
+ * model can request in one parallel step. A section that exceeds its budget
+ * fails loudly here instead of being silently truncated by the harness.
+ */
+const INSTANCE_SECTIONS = {
+  core: [],
+  "content-a": ["technology", "civic", "building", "district", "unit", "project"],
+  "content-b": ["policy", "government", "belief"],
+  "content-c": ["improvement", "resource", "promotion"],
+};
+const INSTANCE_SECTION_BUDGET = 44000;
+const DESC_KINDS = new Set(["policy", "government", "belief", "promotion", "improvement", "resource"]);
+
+function buildInstanceData(ctx, args) {
+  if (!hasTable(ctx, "kb_formula") || !hasTable(ctx, "kb_formula_owner")) {
+    throw new Error(
+      "civi6_instance: 公式层缺失。请在插件卸载状态下运行 `npm run effects:build:bbg`（或 effects:build）重建效果事实层。",
+    );
+  }
+  const build = parseJson(q1(ctx, "SELECT value FROM _meta WHERE key = 'build';")?.value, {}) ?? {};
+  const effectsMeta = parseJson(q1(ctx, "SELECT value FROM _meta WHERE key = 'effects';")?.value, {}) ?? {};
+  const rulesetMeta = parseJson(q1(ctx, "SELECT value FROM _meta WHERE key = 'ruleset';")?.value, {}) ?? {};
+  // `_meta.build.source` is the game install path; the ruleset id is the key the
+  // derived tables are keyed by, so resolve the civ board against that.
+  const source = rulesetMeta.id ?? effectsMeta.rulesetId ?? "bbg";
+  const speed = args.speed === "online" ? "online" : "standard";
+
+  // --- instance parameters (hard constraints only) -------------------------
+  const eraRows = hasTable(ctx, "Eras")
+    ? q(ctx, "SELECT EraType, ChronologyIndex FROM Eras ORDER BY ChronologyIndex;")
+    : [];
+  const eraIndexByType = new Map(eraRows.map((r, i) => [String(r.EraType), i]));
+  const eraName = new Map(eraRows.map((r, i) => [String(r.EraType), i]));
+  const speedRow = hasTable(ctx, "kb_speed_profile")
+    ? q1(ctx, "SELECT speed, total_turns, cost_multiplier FROM kb_speed_profile WHERE speed = ?;", speed)
+    : null;
+  const victories = hasTable(ctx, "kb_victory")
+    ? q(ctx, "SELECT victory_id, name_zh, win_check, critical_percentage, default_burst_turn FROM kb_victory ORDER BY victory_id;")
+    : [];
+  const difficulties = hasTable(ctx, "Difficulties")
+    ? q(ctx, "SELECT DifficultyType, Name FROM Difficulties ORDER BY DifficultyType;").map((r) => ({
+        id: r.DifficultyType,
+        name: r.Name ?? r.DifficultyType,
+      }))
+    : [];
+
+  // --- civ kit (full effect text: the only "thick" part) -------------------
+  let civRow = null;
+  if (args.civ || args.leader) {
+    if (hasTable(ctx, "kb_civ_profile")) {
+      civRow = resolveCiv(ctx, source, args.civ, args.leader);
+    }
+  }
+  const civKit = [];
+  const pushKit = (kind, id, why) => {
+    if (!kind || !id) return;
+    const card = briefEvidenceCard(ctx, kind, id);
+    const effects = card ? parseJsonArray(card.effects_json).map((e) => e.text_zh ?? e.text_en).filter(Boolean) : [];
+    civKit.push({
+      kind,
+      id,
+      name_zh: entityLabel(ctx, kind, id),
+      why,
+      effects: effects.slice(0, 3),
+      dataGap: effects.length === 0,
+    });
+  };
+  if (civRow) {
+    pushKit("civilization", civRow.civ_id, "文明");
+    pushKit("leader", civRow.leader_id, "领袖");
+    for (const id of parseJsonArray(civRow.unique_unit)) pushKit("unit", id, "特色单位");
+    for (const id of parseJsonArray(civRow.unique_building)) pushKit("building", id, "特色建筑");
+    for (const id of parseJsonArray(civRow.unique_district)) pushKit("district", id, "特色区域");
+    for (const id of parseJsonArray(civRow.unique_improvement)) pushKit("improvement", id, "特色改良");
+    for (const id of parseJsonArray(civRow.trait_ids)) pushKit("trait", id, "文明/领袖特性");
+  }
+
+  // --- formulas grouped by owner (the executable side) ---------------------
+  const formulaRows = q(
+    ctx,
+    `SELECT o.owner_kind AS k, o.owner_id AS id, f.desc AS d, f.dimension AS dim,
+            f.value AS v, f.confidence AS c
+       FROM kb_formula_owner o JOIN kb_formula f ON f.modifier_id = o.modifier_id;`,
+  );
+  const formulasByOwner = new Map();
+  const dimIndex = new Map();
+  for (const row of formulaRows) {
+    const key = `${row.k}:${row.id}`;
+    let list = formulasByOwner.get(key);
+    if (!list) {
+      list = [];
+      formulasByOwner.set(key, list);
+    }
+    list.push(row);
+    if (row.dim) {
+      let dimList = dimIndex.get(row.dim);
+      if (!dimList) {
+        dimList = [];
+        dimIndex.set(row.dim, dimList);
+      }
+      dimList.push({ key, v: (Number(row.v) || 0) * (Number(row.c) || 0.5) });
+    }
+  }
+  // Attach the executable side to the civ kit too, so "Lavra gives X" is a
+  // formula, not a sentence.
+  for (const item of civKit) {
+    const list = formulasByOwner.get(`${item.kind}:${item.id}`) ?? [];
+    item.fx = list
+      .slice()
+      .sort((a, b) => (Number(b.c) || 0) - (Number(a.c) || 0))
+      .slice(0, 3)
+      .map((r) => r.d)
+      .join(";");
+  }
+
+  // --- content: every choosable entity, compact rows ----------------------
+  const handles = new Map(); // `${kind}:${id}` -> handle
+  const content = {};
+  const counts = {};
+  const eraIndex = new Map(); // eraIndex -> [handles]
+  const tags = [];
+  const kindRows = new Map();
+  for (const spec of INSTANCE_KINDS) {
+    if (!hasTable(ctx, spec.table)) continue;
+    const cols = tableColumnsOf(ctx, spec.table);
+    if (!cols.has(spec.pk)) continue;
+    const select = [spec.pk];
+    for (const col of [spec.name, spec.era, spec.cost, "PrereqTech", "PrereqCivic", "PrereqDistrict"]) {
+      if (col && cols.has(col)) select.push(col);
+    }
+    const rows = q(ctx, `SELECT ${[...new Set(select)].map((c) => `"${c}"`).join(", ")} FROM "${spec.table}";`);
+    rows.sort((a, b) => String(a[spec.pk]).localeCompare(String(b[spec.pk])));
+    const out = [];
+    rows.forEach((row, i) => {
+      const id = String(row[spec.pk] ?? "");
+      if (!id) return;
+      const handle = `${spec.handle}${i}`;
+      handles.set(`${spec.kind}:${id}`, handle);
+      const nameTag = spec.name && cols.has(spec.name) ? String(row[spec.name] ?? "") : "";
+      if (nameTag.startsWith("LOC_")) tags.push(nameTag);
+      let era = spec.era && cols.has(spec.era) ? String(row[spec.era] ?? "") : "";
+      if (!era && cols.has("PrereqTech")) {
+        const parent = String(row.PrereqTech ?? "");
+        const parentRow = parent ? kindRows.get(`technology:${parent}`) : null;
+        if (parentRow) era = parentRow.era;
+      }
+      if (!era && cols.has("PrereqCivic")) {
+        const parent = String(row.PrereqCivic ?? "");
+        const parentRow = parent ? kindRows.get(`civic:${parent}`) : null;
+        if (parentRow) era = parentRow.era;
+      }
+      const eraIdx = era && eraIndexByType.has(era) ? eraIndexByType.get(era) : null;
+      const list = formulasByOwner.get(`${spec.kind}:${id}`) ?? [];
+      const fx = [...new Set(
+        list
+          .slice()
+          .sort((a, b) => (Number(b.c) || 0) - (Number(a.c) || 0))
+          .map((r) => r.d)
+          .filter(Boolean),
+      )]
+        .slice(0, 3)
+        .join(";");
+      const rowOut = [handle, id, nameTag, eraIdx, row[spec.cost] ?? null, fx];
+      out.push(rowOut);
+      kindRows.set(`${spec.kind}:${id}`, { id, era, row: rowOut });
+      if (eraIdx !== null) {
+        let bucket = eraIndex.get(eraIdx);
+        if (!bucket) {
+          bucket = [];
+          eraIndex.set(eraIdx, bucket);
+        }
+        if (bucket.length < 400) bucket.push(handle);
+      }
+    });
+    content[spec.kind] = { columns: ["h", "id", "name", "era", "cost", "fx"], rows: out };
+    counts[spec.kind] = out.length;
+  }
+
+  // --- relations: prerequisites as handle pairs ---------------------------
+  const relations = [];
+  const addEdge = (fromKind, fromId, toKind, toId) => {
+    const a = handles.get(`${fromKind}:${fromId}`);
+    const b = handles.get(`${toKind}:${toId}`);
+    if (a && b) relations.push([a, b]);
+  };
+  if (hasTable(ctx, "TechnologyPrereqs")) {
+    for (const r of q(ctx, "SELECT Technology, PrereqTech FROM TechnologyPrereqs;")) {
+      addEdge("technology", r.Technology, "technology", r.PrereqTech);
+    }
+  }
+  if (hasTable(ctx, "CivicPrereqs")) {
+    for (const r of q(ctx, "SELECT Civic, PrereqCivic FROM CivicPrereqs;")) {
+      addEdge("civic", r.Civic, "civic", r.PrereqCivic);
+    }
+  }
+  for (const spec of INSTANCE_KINDS) {
+    if (!hasTable(ctx, spec.table)) continue;
+    const cols = tableColumnsOf(ctx, spec.table);
+    if (!cols.has("PrereqTech") && !cols.has("PrereqCivic")) continue;
+    const extra = [];
+    if (cols.has("PrereqTech")) extra.push(`"PrereqTech"`);
+    if (cols.has("PrereqCivic")) extra.push(`"PrereqCivic"`);
+    if (!extra.length) continue;
+    for (const r of q(ctx, `SELECT "${spec.pk}" AS id, ${extra.join(", ")} FROM "${spec.table}";`)) {
+      if (r.PrereqTech) addEdge(spec.kind, r.id, "technology", r.PrereqTech);
+      if (r.PrereqCivic) addEdge(spec.kind, r.id, "civic", r.PrereqCivic);
+    }
+  }
+
+  // --- district -> buildings index ----------------------------------------
+  const buildingsByDistrict = {};
+  if (hasTable(ctx, "Buildings")) {
+    for (const r of q(ctx, `SELECT BuildingType, PrereqDistrict FROM Buildings WHERE PrereqDistrict IS NOT NULL;`)) {
+      const d = handles.get(`district:${r.PrereqDistrict}`);
+      const b = handles.get(`building:${r.BuildingType}`);
+      if (!d || !b) continue;
+      (buildingsByDistrict[d] ??= []).push(b);
+    }
+  }
+
+  // --- yield -> owners index (neutral: categories, not victory lines) -----
+  const byDimension = {};
+  for (const [dim, list] of [...dimIndex.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
+    list.sort((a, b) => b.v - a.v);
+    const picked = [];
+    const seen = new Set();
+    for (const item of list) {
+      const handle = handles.get(item.key);
+      if (!handle || seen.has(handle)) continue;
+      seen.add(handle);
+      picked.push(handle);
+      if (picked.length >= 120) break;
+    }
+    if (picked.length) byDimension[dim] = picked;
+  }
+
+  const eraIndexOut = {};
+  for (const [era, list] of [...eraIndex.entries()].sort((a, b) => a[0] - b[0])) {
+    eraIndexOut[era] = list;
+  }
+
+  // --- short descriptions where the formula layer has no sentence ----------
+  // These are exactly the rows models used to fetch with SQL (belief/policy/
+  // government/promotion text); the `d` column is only filled when `fx` is empty.
+  const descById = new Map();
+  if (hasTable(ctx, "effect_cards")) {
+    for (const kind of DESC_KINDS) {
+      for (const r of q(
+        ctx,
+        `SELECT owner_id, description_zh FROM effect_cards WHERE owner_kind = ? AND description_zh IS NOT NULL;`,
+        kind,
+      )) {
+        const text = String(r.description_zh).replace(/\s+/g, " ").trim();
+        if (text) descById.set(`${kind}:${r.owner_id}`, text.length > 32 ? `${text.slice(0, 31)}…` : text);
+      }
+    }
+  }
+
+  // Resolve LOC names in one batched pass.
+  if (tags.length) {
+    const lookup = localizeMany(ctx, tags, "zh_Hans_CN");
+    for (const section of Object.values(content)) {
+      for (const row of section.rows) {
+        if (typeof row[2] === "string" && row[2].startsWith("LOC_")) {
+          row[2] = lookup(row[2]) ?? row[2];
+        }
+      }
+    }
+  }
+
+  for (const [kind, section] of Object.entries(content)) {
+    if (!DESC_KINDS.has(kind)) continue;
+    section.columns = [...section.columns, "d"];
+    for (const row of section.rows) {
+      row.push(row[5] ? null : (descById.get(`${kind}:${row[1]}`) ?? null));
+    }
+  }
+
+  // --- global parameters / great people / operations / boosts -------------
+  // Neutral facts: hard-constraint-independent, and previously fetched by hand.
+  const PARAM_HINTS = ["RELIGION_", "TOURISM_", "COMBAT_", "CITY_", "DIPLOMACY_", "GREAT_PERSON", "BELIEF", "PROPHET", "ENHANCE"];
+  const params = hasTable(ctx, "GlobalParameters")
+    ? q(ctx, "SELECT Name, Value FROM GlobalParameters ORDER BY Name;")
+        .filter((r) => PARAM_HINTS.some((p) => String(r.Name).includes(p)))
+        .map((r) => [String(r.Name), String(r.Value ?? "")])
+    : [];
+  const greatPersonClasses = hasTable(ctx, "GreatPersonClasses")
+    ? q(ctx, "SELECT GreatPersonClassType, Name FROM GreatPersonClasses ORDER BY GreatPersonClassType;").map((r) => ({
+        id: r.GreatPersonClassType,
+        name: r.Name ?? r.GreatPersonClassType,
+      }))
+    : [];
+  const gppBaseCost = hasTable(ctx, "Eras")
+    ? q(ctx, "SELECT EraType, GreatPersonBaseCost FROM Eras WHERE GreatPersonBaseCost IS NOT NULL ORDER BY ChronologyIndex;").map(
+        (r) => [r.EraType, r.GreatPersonBaseCost],
+      )
+    : [];
+  const operations = hasTable(ctx, "UnitOperations")
+    ? [...new Set(
+        q(ctx, "SELECT OperationType FROM UnitOperations ORDER BY OperationType;").map((r) => String(r.OperationType ?? "")),
+      )]
+        .filter(Boolean)
+        .map((id) => [id])
+    : [];
+  const boostRows = hasTable(ctx, "Boosts")
+    ? q(ctx, "SELECT TechnologyType, CivicType, TriggerDescription FROM Boosts;")
+    : [];
+  const boostTags = boostRows
+    .map((r) => String(r.TriggerDescription ?? ""))
+    .filter((t) => t.startsWith("LOC_"));
+  const boostLookup = boostTags.length ? localizeMany(ctx, boostTags, "zh_Hans_CN") : () => undefined;
+  const boosts = boostRows
+    .map((r) => [
+      r.TechnologyType ?? r.CivicType ?? null,
+      boostLookup(String(r.TriggerDescription ?? "")) ?? r.TriggerDescription ?? null,
+    ])
+    .filter((r) => r[0] && r[1]);
+
+  return {
+    meta: {
+      ruleset: source,
+      builtAt: build.builtAt ?? effectsMeta.builtAt ?? null,
+      encoding: {
+        h: "句柄（t=科技 c=市政 b=建筑 d=区域 u=单位 p=政策 g=政体 bl=信条 i=改良 r=资源 pr=项目 pm=晋升；数字为同类行号）",
+        name: "LOC 标签（由 name_zh 解析）或原名",
+        era: "eras[] 下标",
+        cost: "生产力成本（原表 Cost）",
+        fx: "该实体的可执行公式摘要（由 kb_formula 渲染，最多 3 条）",
+        d: "fx 为空时的官方描述（≤32 字）",
+        relations: "[子句柄, 前置句柄] 对",
+        params: "[GlobalParameters.Name, Value]",
+        boosts: "[tech|civic id, 灵感触发文本]",
+      },
+      formulaCoverage: effectsMeta.formulaCoverage ?? null,
+    },
+    instance: {
+      civ: civRow?.civ_id ?? null,
+      leader: civRow?.leader_id ?? null,
+      speed,
+      difficulty: args.difficulty ?? null,
+      speedProfile: speedRow
+        ? { totalTurns: speedRow.total_turns, costMultiplier: speedRow.cost_multiplier }
+        : null,
+      eras: eraRows.map((r, i) => ({ index: i, id: r.EraType })),
+      difficulties,
+      victories,
+    },
+    civKit,
+    content,
+    relations,
+    indexes: { era: eraIndexOut, dimension: byDimension, buildingsByDistrict },
+    omitted: INSTANCE_OMITTED,
+    counts,
+    params,
+    greatPersonClasses,
+    gppBaseCost,
+    operations,
+    boosts,
+    integrity: {
+      rows: Object.values(counts).reduce((a, b) => a + b, 0),
+      formulas: formulaRows.length,
+      relations: relations.length,
+    },
+  };
+}
+
+/** Assemble one bounded page of the packet; oversize is an error, never a cut. */
+function assembleInstanceSection(data, section) {
+  const sections = {};
+  sections.core = {
+    section: "core",
+    meta: data.meta,
+    instance: data.instance,
+    civKit: data.civKit,
+    relations: data.relations,
+    indexes: data.indexes,
+    omitted: data.omitted,
+    counts: data.counts,
+    integrity: data.integrity,
+    params: data.params,
+    greatPersonClasses: data.greatPersonClasses,
+    gppBaseCost: data.gppBaseCost,
+    operations: data.operations,
+  };
+  for (const [name, kinds] of Object.entries(INSTANCE_SECTIONS)) {
+    if (!kinds.length) continue;
+    const content = {};
+    for (const kind of kinds) if (data.content[kind]) content[kind] = data.content[kind];
+    sections[name] = { section: name, content };
+    if (name === "content-a") sections[name].boosts = data.boosts;
+  }
+  const sizes = {};
+  for (const [name, value] of Object.entries(sections)) sizes[name] = JSON.stringify(value).length;
+  sections.core.manifest = {
+    sections: sizes,
+    next: Object.keys(INSTANCE_SECTIONS).filter((name) => name !== "core"),
+    rows: data.integrity.rows,
+    note: "同一回合并行取 core + content-a + content-b + content-c；四片合起来才是完整包。换胜利线不重新取数。",
+  };
+  const picked = sections[section];
+  if (!picked) {
+    throw new Error(`civi6_instance: 未知分片 "${section}"（可用：${Object.keys(sections).join(" / ")}）`);
+  }
+  const text = JSON.stringify(picked);
+  if (text.length > INSTANCE_SECTION_BUDGET) {
+    const blocks = Object.entries(picked.content ?? {})
+      .map(([kind, value]) => [kind, JSON.stringify(value).length])
+      .sort((a, b) => b[1] - a[1]);
+    throw new Error(
+      `civi6_instance: 分片 "${section}" 序列化为 ${text.length} 字符，超过 ${INSTANCE_SECTION_BUDGET} 上限` +
+        `（最大块：${blocks.slice(0, 4).map(([kind, n]) => `${kind} ${n}`).join(" / ") || "core"}）。` +
+        "请把该分片再拆小，不要交给传输层截断。",
+    );
+  }
+  return picked;
+}
+
+let INSTANCE_CACHE = null;
+
+function buildInstanceSection(ctx, args, section) {
+  const builtAt = q1(ctx, "SELECT value FROM _meta WHERE key = 'build';")?.value ?? "";
+  const key = `${builtAt}|${args.civ ?? ""}|${args.leader ?? ""}|${args.speed ?? ""}|${args.difficulty ?? ""}`;
+  if (!INSTANCE_CACHE || INSTANCE_CACHE.key !== key) {
+    INSTANCE_CACHE = { key, data: buildInstanceData(ctx, args) };
+  }
+  return assembleInstanceSection(INSTANCE_CACHE.data, section);
+}
+
+function instanceTool(getKb) {
+  return makeTool({
+    name: "civi6_instance",
+    description:
+      "Objective-free instance packet, delivered as bounded sections because a single result cannot carry ~90KB. Call it ONCE per instance as ONE parallel step: section='core' + 'content-a' + 'content-b' + 'content-c' — the four together are the full packet (core.manifest lists the sizes and what is still missing). Sections are: core = hard constraints + civ kit + prerequisite edges + neutral indexes (era / yield / district) + GlobalParameters subset + great-person classes + unit operations; content-a = technology, civic, building, district, unit, project (+ boosts); content-b = policy, government, belief; content-c = improvement, resource, promotion. Rows are [handle, id, name, era, cost, fx, d]; read them by handle, and use civi6_eval for arithmetic. Changing victory line does NOT require a re-fetch. A section that would exceed its budget fails loudly instead of being truncated.",
+    parameters: {
+      type: "object",
+      properties: {
+        civ: { type: "string", description: "Civilization id or Chinese/English name (e.g. Russia / 俄罗斯)." },
+        leader: { type: "string", description: "Leader id or name (optional)." },
+        speed: { type: "string", enum: ["standard", "online"], description: "Game speed (hard constraint). Default standard." },
+        difficulty: { type: "string", description: "Difficulty id (optional; listed in instance.difficulties)." },
+        section: {
+          type: "string",
+          enum: ["core", "content-a", "content-b", "content-c"],
+          description: "Which bounded page of the packet to return. Fetch all four in the same step.",
+        },
+      },
+      required: ["section"],
+    },
+    budget: INSTANCE_SECTION_BUDGET,
+    execute: (args) => {
+      assertNoSource(args);
+      return buildInstanceSection(getKb().ctx, args ?? {}, String(args?.section ?? "core"));
+    },
+  });
+}
+
+const ENTITY_KIND_BY_PREFIX = [
+  ["TECHNOLOGY_", "technology"],
+  ["TECH_", "technology"],
+  ["CIVIC_", "civic"],
+  ["BUILDING_", "building"],
+  ["DISTRICT_", "district"],
+  ["UNIT_", "unit"],
+  ["PROJECT_", "project"],
+  ["POLICY_", "policy"],
+  ["IMPROVEMENT_", "improvement"],
+  ["RESOURCE_", "resource"],
+  ["BELIEF_", "belief"],
+  ["GOVERNMENT_", "government"],
+];
+
+function kindOfEntityId(id) {
+  const text = String(id ?? "");
+  for (const [prefix, kind] of ENTITY_KIND_BY_PREFIX) {
+    if (text.startsWith(prefix)) return kind;
+  }
+  return "other";
+}
+
+const COST_CURRENCY = {
+  technology: "science",
+  civic: "culture",
+  building: "production",
+  district: "production",
+  unit: "production",
+  project: "production",
+  improvement: "production",
+};
+
+const COST_SPEC = {
+  technology: ["Technologies", "TechnologyType", "Cost"],
+  civic: ["Civics", "CivicType", "Cost"],
+  building: ["Buildings", "BuildingType", "Cost"],
+  district: ["Districts", "DistrictType", "Cost"],
+  unit: ["Units", "UnitType", "Cost"],
+  project: ["Projects", "ProjectType", "Cost"],
+};
+
+/**
+ * Preload the prerequisite graph and costs once per eval call. Small tables
+ * (77 techs / 61 civics / 138 buildings / 36 districts / 144 units / 40
+ * projects), so a few queries beat N per-node lookups.
+ */
+function loadPlanGraph(ctx) {
+  const costs = new Map();
+  for (const [kind, [table, pk, col]] of Object.entries(COST_SPEC)) {
+    if (!hasTable(ctx, table)) continue;
+    const cols = tableColumnsOf(ctx, table);
+    if (!cols.has(pk) || !cols.has(col)) continue;
+    for (const r of q(ctx, `SELECT "${pk}" AS id, "${col}" AS cost FROM "${table}";`)) {
+      const value = Number(r.cost);
+      if (Number.isFinite(value) && value > 0) costs.set(String(r.id), value);
+    }
+  }
+  const parents = new Map();
+  const addEdge = (child, parent) => {
+    if (!child || !parent) return;
+    let list = parents.get(String(child));
+    if (!list) {
+      list = [];
+      parents.set(String(child), list);
+    }
+    if (!list.includes(String(parent))) list.push(String(parent));
+  };
+  if (hasTable(ctx, "TechnologyPrereqs")) {
+    for (const r of q(ctx, "SELECT Technology, PrereqTech FROM TechnologyPrereqs;")) addEdge(r.Technology, r.PrereqTech);
+  }
+  if (hasTable(ctx, "CivicPrereqs")) {
+    for (const r of q(ctx, "SELECT Civic, PrereqCivic FROM CivicPrereqs;")) addEdge(r.Civic, r.PrereqCivic);
+  }
+  if (hasTable(ctx, "BuildingPrereqs")) {
+    for (const r of q(ctx, "SELECT Building, PrereqBuilding FROM BuildingPrereqs;")) addEdge(r.Building, r.PrereqBuilding);
+  }
+  for (const [table, pk, cols] of [
+    ["Buildings", "BuildingType", ["PrereqTech", "PrereqCivic", "PrereqDistrict"]],
+    ["Districts", "DistrictType", ["PrereqTech", "PrereqCivic"]],
+    ["Units", "UnitType", ["PrereqTech", "PrereqCivic"]],
+    ["Projects", "ProjectType", ["PrereqTech", "PrereqCivic", "PrereqDistrict"]],
+  ]) {
+    if (!hasTable(ctx, table)) continue;
+    const tableCols = tableColumnsOf(ctx, table);
+    const use = cols.filter((c) => tableCols.has(c));
+    if (!use.length) continue;
+    for (const r of q(ctx, `SELECT "${pk}" AS id, ${use.map((c) => `"${c}"`).join(", ")} FROM "${table}";`)) {
+      for (const c of use) addEdge(r.id, r[c]);
+    }
+  }
+  return { costs, parents };
+}
+
+function closureOf(graph, seedIds, limit = 250) {
+  const depth = new Map();
+  const queue = [];
+  for (const id of seedIds) {
+    if (!id) continue;
+    depth.set(String(id), 0);
+    queue.push(String(id));
+  }
+  while (queue.length && depth.size < limit) {
+    const id = queue.shift();
+    const d = depth.get(id) ?? 0;
+    for (const parent of graph.parents.get(id) ?? []) {
+      if (depth.has(parent)) continue;
+      depth.set(parent, d + 1);
+      queue.push(parent);
+    }
+  }
+  return depth;
+}
+
+function eraDeadline(ctx, source, eraId, eraIndex) {
+  if (!hasTable(ctx, "kb_era_window")) return { turn: 50, source: "fallback", confidence: 0.3 };
+  const row = eraId
+    ? q1(ctx, "SELECT * FROM kb_era_window WHERE source = ? AND era_id = ?;", source, eraId)
+    : q1(
+        ctx,
+        "SELECT * FROM kb_era_window WHERE source = ? AND era_index = ?;",
+        source,
+        (Number.isFinite(eraIndex) ? eraIndex : 0) + 1,
+      );
+  if (!row) return { turn: 50, source: "fallback", confidence: 0.3 };
+  return {
+    turn: Number(row.turn_hi) || 50,
+    era: row.era_id,
+    source: row.source_flag ?? "empirical",
+    confidence: row.confidence ?? 0.5,
+  };
+}
+
+/**
+ * Deterministic scratchpad for candidate plans. It never fetches data: it only
+ * composes the formula rows that `civi6_instance` already put in context.
+ * Returns per-dimension totals plus the composition (who contributes what), so
+ * the answer can cite arithmetic instead of doing it in prose.
+ */
+function buildEvalResult(ctx, args) {
+  if (!hasTable(ctx, "kb_formula") || !hasTable(ctx, "kb_formula_owner")) {
+    throw new Error("civi6_eval: 公式层缺失。请先运行 `npm run effects:build:bbg` 重建效果事实层。");
+  }
+  const builds = Array.isArray(args.builds) ? args.builds.map(String).filter(Boolean) : [];
+  const cities = Number.isFinite(args.cities) ? Number(args.cities) : 1;
+  const popPerCity = Number.isFinite(args.popPerCity) ? Number(args.popPerCity) : 1;
+  const eraIndex = Number.isFinite(args.eraIndex) ? Number(args.eraIndex) : null;
+
+  const rows = [];
+  for (const part of chunk(uniq(builds), 300)) {
+    rows.push(
+      ...q(
+        ctx,
+        `SELECT o.owner_id AS id, o.owner_kind AS kind, f.dimension AS dim, f.op AS op,
+                f.value AS v, f.per AS per, f.desc AS d, f.confidence AS c, f.fx_id AS fx
+           FROM kb_formula_owner o JOIN kb_formula f ON f.modifier_id = o.modifier_id
+          WHERE o.owner_id IN (${placeholders(part.length)});`,
+        ...part,
+      ),
+    );
+  }
+  const found = new Set(rows.map((r) => r.id));
+  const missing = builds.filter((id) => !found.has(id));
+
+  const dims = new Map();
+  for (const row of rows) {
+    if (!row.dim) continue;
+    const per = row.per ?? "city";
+    const multiplier =
+      per === "pop"
+        ? cities * popPerCity
+        : per === "era"
+          ? cities * (eraIndex !== null ? eraIndex + 1 : 1)
+          : per === "adjacent" || per === "resource" || per === "trade_route"
+            ? cities
+            : cities;
+    const value = (Number(row.v) || 0) * multiplier;
+    let bucket = dims.get(row.dim);
+    if (!bucket) {
+      bucket = { add: 0, percent: 0, assumed: 0, composition: [] };
+      dims.set(row.dim, bucket);
+    }
+    if (row.op === "percent") bucket.percent += Number(row.v) || 0;
+    else bucket.add += value;
+    if (row.op === "attach" || row.op === "grant") continue;
+    if (per === "adjacent" || per === "resource" || per === "trade_route") bucket.assumed += 1;
+    bucket.composition.push({
+      id: row.id,
+      fx: row.fx,
+      op: row.op,
+      value: Math.round(value * 100) / 100,
+      per,
+      desc: row.d,
+      confidence: row.c,
+    });
+  }
+
+  const metrics = [];
+  for (const [dim, bucket] of [...dims.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
+    bucket.composition.sort((a, b) => Math.abs(b.value) - Math.abs(a.value));
+    const afterPercent = Math.round(bucket.add * (1 + bucket.percent / 100) * 100) / 100;
+    metrics.push({
+      dimension: dim,
+      add: Math.round(bucket.add * 100) / 100,
+      percent: Math.round(bucket.percent * 10) / 10,
+      supply: afterPercent,
+      assumedPerCopy: bucket.assumed,
+      composition: bucket.composition.slice(0, 10),
+      contributors: bucket.composition.length,
+    });
+  }
+
+  const ruleset = parseJson(q1(ctx, "SELECT value FROM _meta WHERE key = 'ruleset';")?.value, {}) ?? {};
+  const source = ruleset.id ?? "bbg";
+  const supplyByDim = new Map(metrics.map((m) => [m.dimension, m.supply]));
+
+  let demand = [];
+  if (args.victory && hasTable(ctx, "kb_target")) {
+    const planId = `${String(args.victory)}:${source}`;
+    const eraId = args.eraId ? String(args.eraId) : null;
+    demand = q(
+      ctx,
+      `SELECT dimension_id, entity_id, op, value_num, value_lo, value_hi, unit, source_flag, confidence, era_id, label_zh
+         FROM kb_target
+        WHERE plan_id = ? AND slice_kind = 'era' ${eraId ? "AND era_id = ?" : ""}
+        ORDER BY era_id, dimension_id;`,
+      ...(eraId ? [planId, eraId] : [planId]),
+    ).map((r) => ({
+      era: r.era_id,
+      dimension: r.dimension_id,
+      entity: r.entity_id ?? null,
+      op: r.op,
+      value: r.value_num ?? null,
+      lo: r.value_lo ?? null,
+      hi: r.value_hi ?? null,
+      unit: r.unit ?? null,
+      source: r.source_flag,
+      confidence: r.confidence,
+      label: r.label_zh ?? null,
+    }));
+  }
+
+  // Demand is a per-era band; an unfiltered dump of all 8 eras is noise (and
+  // blows the payload budget), so keep the candidate era unless explicitly asked.
+  if (demand.length) {
+    const eraForIndex = eraIndex !== null ? eraDeadline(ctx, source, null, eraIndex).era : null;
+    if (args.eraId) demand = demand.filter((r) => r.era === String(args.eraId));
+    else if (eraForIndex) demand = demand.filter((r) => r.era === eraForIndex);
+    demand = demand.slice(0, 48);
+  }
+
+  // ---- required side: gate closure -> per-currency ledger ----------------
+  const gates = Array.isArray(args.gates) ? args.gates.map(String).filter(Boolean) : [];
+  const deadline = eraDeadline(ctx, source, args.eraId ? String(args.eraId) : null, eraIndex);
+  let pathOut = null;
+  let ledger = [];
+  let cut = [];
+  let scenarios = [];
+  if (gates.length) {
+    const graph = loadPlanGraph(ctx);
+    const closure = closureOf(graph, gates, 250);
+    const nodes = [];
+    const requiredByCurrency = {};
+    for (const [id, depth] of closure) {
+      const cost = graph.costs.get(id) ?? 0;
+      const kind = kindOfEntityId(id);
+      const currency = COST_CURRENCY[kind] ?? "production";
+      if (cost > 0) requiredByCurrency[currency] = (requiredByCurrency[currency] ?? 0) + cost;
+      nodes.push({ id, kind, depth, cost, currency });
+    }
+    pathOut = {
+      gates: gates.slice(0, 40),
+      closure: nodes.length,
+      onPath: nodes.filter((n) => n.depth === 0).map((n) => n.id).slice(0, 40),
+      prereqs: nodes
+        .filter((n) => n.depth > 0)
+        .sort((a, b) => b.depth - a.depth || b.cost - a.cost)
+        .slice(0, 40)
+        .map((n) => n.id),
+      totalCost: Object.fromEntries(Object.entries(requiredByCurrency).map(([k, v]) => [k, Math.round(v)])),
+    };
+    for (const [currency, amount] of Object.entries(requiredByCurrency).sort((a, b) => b[1] - a[1])) {
+      const supply = supplyByDim.get(`${currency}_per_turn`) ?? 0;
+      const requiredPerTurn = Math.round((amount / Math.max(1, deadline.turn)) * 100) / 100;
+      const gap = Math.round((requiredPerTurn - supply) * 100) / 100;
+      ledger.push({
+        currency,
+        required: Math.round(amount),
+        deadlineTurn: deadline.turn,
+        requiredPerTurn,
+        supplyPerTurn: Math.round(supply * 100) / 100,
+        gap,
+        verdict: gap > requiredPerTurn * 0.5 ? "short" : gap > 0 ? "tight" : "ok",
+      });
+    }
+    cut = nodes
+      .filter((n) => n.cost > 0)
+      .sort((a, b) => b.cost - a.cost)
+      .slice(0, 5)
+      .map((n, i) => {
+        const supply = supplyByDim.get(`${n.currency}_per_turn`) ?? 0;
+        return {
+          rank: i + 1,
+          id: n.id,
+          kind: n.kind,
+          cost: Math.round(n.cost),
+          currency: n.currency,
+          slipTurns: supply > 0 ? Math.ceil(n.cost / supply) : null,
+          saves: { [n.currency]: Math.round(n.cost) },
+        };
+      });
+    scenarios = [
+      { id: "low", supplyFactor: 0.6 },
+      { id: "base", supplyFactor: 1 },
+      { id: "high", supplyFactor: 1.4 },
+    ].map((s) => {
+      const gaps = ledger.map((row) => ({
+        currency: row.currency,
+        gap: Math.round((row.requiredPerTurn - row.supplyPerTurn * s.supplyFactor) * 100) / 100,
+      }));
+      return {
+        id: s.id,
+        supplyFactor: s.supplyFactor,
+        gaps,
+        feasible: gaps.every((g) => g.gap <= 0),
+      };
+    });
+  }
+
+  return {
+    assumptions: { cities, popPerCity, eraIndex, builds: builds.length, gates: gates.length },
+    ledger,
+    metrics,
+    path: pathOut,
+    cut,
+    scenarios,
+    demand,
+    deadline,
+    missingBuilds: missing,
+    note:
+      "供应 = Σ(公式值 × 份数) 后再乘百分比；per=adjacent/resource/trade_route 的份数按 1 城计（assumedPerCopy）。" +
+      "需求 = gates 的前置闭包成本 ÷ 该时代截止回合（kb_era_window.turn_hi，empirical，保留 confidence）。" +
+      "cut 的 slipTurns = 该节点成本 ÷ 对应产出的每回合供给（无供给则 null）。",
+  };
+}
+
+function evalTool(getKb) {
+  return makeTool({
+    name: "civi6_eval",
+    description:
+      "Deterministic scratchpad over the formula layer. Supply side: a candidate build set + city/pop/era assumptions -> per-dimension supply with the top contributors. Required side: a gate set (techs/civics/buildings/units/projects) -> prerequisite closure, per-currency ledger (required vs supply per turn, gap, verdict), ranked cut list with slipTurns, and low/base/high scenarios. Fetches no data. Call it instead of doing arithmetic in prose.",
+    parameters: {
+      type: "object",
+      properties: {
+        builds: {
+          type: "array",
+          items: { type: "string" },
+          description: "Supply-side entity ids from the instance packet (content[].rows[i][1], e.g. BUILDING_LIBRARY).",
+        },
+        gates: {
+          type: "array",
+          items: { type: "string" },
+          description:
+            "Required-side entity ids (e.g. TECH_EDUCATION, CIVIC_THEOLOGY, BUILDING_UNIVERSITY). Their prerequisite closure is costed and compared against supply.",
+        },
+        cities: { type: "integer", description: "How many cities have the build set. Default 1." },
+        popPerCity: { type: "integer", description: "Population per city (used by per=pop formulas). Default 1." },
+        eraIndex: { type: "integer", description: "Era index from instance.eras (0-based), for per=era formulas." },
+        victory: {
+          type: "string",
+          enum: ["science", "culture", "religion", "domination", "diplomatic"],
+          description: "Optional: attach the plan band demand for this victory line.",
+        },
+        eraId: { type: "string", description: "Optional era id (ERA_ANCIENT ...) to filter the demand band." },
+      },
+      required: ["builds"],
+    },
+    execute: (args) => {
+      assertNoSource(args);
+      return buildEvalResult(getKb().ctx, args ?? {});
+    },
+  });
+}
+
 function searchTool(getKb) {
   return makeTool({
     name: "civi6_search",
     description:
-      "Lexical (BM25) search over entity documents, Chinese + English, e.g. '学院 相邻加成' or 'nuclear weapon'. Returns ids you can feed straight into civi6_entity. Restrict with type to keep results on target.",
+      "Lexical (BM25) search over entity documents. The index is bilingual, so one query is enough: do not send a Chinese and an English variant of the same question. Returns ids you can feed straight into civi6_entity. Restrict with type to keep results on target.",
     parameters: {
       type: "object",
       properties: {
-        q: { type: "string", description: "Search query, Chinese or English." },
+        q: { type: "string", description: "Search query, Chinese or English (2-6 distinctive terms works best)." },
         scope: {
           type: "string",
           enum: ["entity", "plan", "all"],
@@ -2215,21 +4201,28 @@ function searchTool(getKb) {
             "entity = raw entity and effect docs (default); plan = precomputed decision cards; all = both.",
         },
         type: { type: "string", enum: TYPE_ENUM, description: "Optional entity type to restrict results to (entity scope)." },
-        limit: { type: "integer", description: "Max results, 1-100. Default 20." },
+        limit: { type: "integer", description: "Max results, 1-100. Default 10." },
       },
       required: ["q"],
     },
+    ...RENDER.search,
     execute: (args) => {
       assertNoSource(args);
       const kb = getKb();
+      const limit = args.limit ?? 10;
       const scope = args.scope === "plan" || args.scope === "all" ? args.scope : "entity";
-      if (scope === "plan") {
-        return kb.search(args.q ?? "", { type: "card", scope: "plan", full: true, limit: args.limit });
-      }
-      if (scope === "all") {
-        return kb.search(args.q ?? "", { scope: "all", limit: args.limit });
-      }
-      return kb.search(args.q ?? "", { type: args.type, scope: "entity", limit: args.limit });
+      const result =
+        scope === "plan"
+          ? kb.search(args.q ?? "", { type: "card", scope: "plan", full: true, limit })
+          : scope === "all"
+            ? kb.search(args.q ?? "", { scope: "all", limit })
+            : kb.search(args.q ?? "", { type: args.type, scope: "entity", limit });
+      // Snippets are for ranking, not for reading: the full text lives in
+      // civi6_entity / brief.evidence. 200 chars keeps a hit list cheap.
+      result.results = (result.results ?? []).map((r) =>
+        r.snippet && r.snippet.length > 200 ? { ...r, snippet: `${r.snippet.slice(0, 200)}…` } : r,
+      );
+      return result;
     },
   });
 }
@@ -2238,7 +4231,7 @@ function planTool(getKb) {
   return makeTool({
     name: "civi6_plan",
     description:
-      "Decision slice for a victory. view='focus' is the reasoning layer: objective capsule, per-era budget ledger (required vs integrated supply per currency, with the gap), named supply sources, ranked cut order with slip cost, scenario band with decision robustness, and 3 era-focus actions per era. Other views: burst (horizontal gates), ladder (vertical era bands), check (checkpoints), civ (civilization board), all. Pass speed='online' to scale turns and tech/civic costs; pass civ/leader to load that civilization's objective when one is authored.",
+      "Decision slice for a victory. view='focus' is the reasoning layer AND the answer packet: objective capsule, per-era budget ledger, named supply sources, ranked cut order, scenario band, path, era focus, plus `brief` (verbatim evidence for the entities the answer needs, mechanics the data layer models, remaining work groups, a 6-section answer outline, and explicitly unmodelled topics). Start a how-to-play question with focus + detail:'summary'; if brief.coverage.complete is true, answer from it — do not search/fetch again. Other views: burst (horizontal gates), ladder (vertical era bands), check (checkpoints), civ (civilization board), all. Pass speed='online' to scale turns and tech/civic costs; pass civ/leader to load that civilization's objective (the response header then describes that objective).",
     parameters: {
       type: "object",
       properties: {
@@ -2267,14 +4260,16 @@ function planTool(getKb) {
         detail: {
           type: "string",
           enum: ["summary", "full"],
-          description: "summary omits formula/provenance; full includes them.",
+          description:
+            "summary = every contract-cited field (complete); full = summary plus provenance/derivation rows (larger, may be compacted). Default summary.",
         },
       },
       required: ["victory"],
     },
+    ...RENDER.plan,
     execute: (args) => {
       assertNoSource(args);
-      return getKb().plan({
+      const result = getKb().plan({
         victory: args.victory,
         civ: args.civ,
         leader: args.leader,
@@ -2283,6 +4278,17 @@ function planTool(getKb) {
         view: args.view,
         detail: args.detail,
       });
+      // Arm/disarm the visible work budget from the brief's own coverage.
+      if (result?.brief?.coverage) {
+        WORK_STATE = {
+          complete: result.brief.coverage.complete === true,
+          maxExtraCalls: Number(result.brief.workPlan?.maxExtraCalls) || 0,
+          extraCalls: 0,
+        };
+      } else {
+        WORK_STATE = null;
+      }
+      return result;
     },
   });
 }
@@ -2291,12 +4297,12 @@ function entitiesTool(getKb) {
   return makeTool({
     name: "civi6_entities",
     description:
-      "List entities of one type with localized names, curated stats and optional one-line effects. Filter by id/name substring with q. Use effects:true for belief/building lists; use full:true only when every raw column is needed. Items of type='governor_promotion' include governors[] (authoritative owner); type='governor' lists the kit for that governor.",
+      "List entities of one type with localized names, curated stats and optional one-line effects. q matches the id, the raw name tag and the localized Chinese/English name. Use effects:true for belief/building lists; use full:true only when every raw column is needed. Items of type='governor_promotion' include governors[] (authoritative owner); type='governor' lists the kit for that governor. For type='promotion', promotionClass lists one promotion tree (e.g. PROMOTION_CLASS_HEAVY_CAVALRY).",
     parameters: {
       type: "object",
       properties: {
         type: { type: "string", enum: TYPE_ENUM, description: "Entity type." },
-        q: { type: "string", description: "Optional substring filter on id or name." },
+        q: { type: "string", description: "Optional substring filter on id or localized (zh/en) name." },
         limit: { type: "integer", description: "Max rows, 1-200. Default 30." },
         offset: { type: "integer", description: "Zero-based offset. Default 0." },
         full: { type: "boolean", description: "Return every raw column instead of the curated stats." },
@@ -2307,9 +4313,14 @@ function entitiesTool(getKb) {
           enum: BELIEF_CLASSES,
           description: "For type='belief', restrict to one belief class.",
         },
+        promotionClass: {
+          type: "string",
+          description: "For type='promotion', restrict to one promotion tree, e.g. PROMOTION_CLASS_HEAVY_CAVALRY.",
+        },
       },
       required: ["type"],
     },
+    ...RENDER.entity,
     execute: (args) => {
       assertNoSource(args);
       return getKb().listEntities(args.type, {
@@ -2320,6 +4331,7 @@ function entitiesTool(getKb) {
         effects: args.effects === true,
         effectLimit: args.effectLimit,
         beliefClass: args.beliefClass,
+        promotionClass: args.promotionClass,
       });
     },
   });
@@ -2329,7 +4341,7 @@ function entityTool(getKb) {
   return makeTool({
     name: "civi6_entity",
     description:
-      "Canonical detail for one or more entities: official description, stats, localized effects with provenance, and raw modifier details. Accepts exact ids (DISTRICT_CAMPUS) or names (学院, resolved automatically); pass ids:[...] to fetch several at once. effects:'full' returns every effect line; modifiers:'full' adds the raw requirement/argument chain. For type='governor_promotion', governors[] is the authoritative owner list (from GovernorPromotionSets; never infer it from the id); for type='governor', promotions[] is that governor's kit.",
+      "Canonical detail for one or more entities: official description, curated stats, localized effects with provenance, and optional raw modifier details. Accepts exact ids (DISTRICT_CAMPUS) or names (学院, resolved automatically); pass ids:[...] to batch (every requested item is returned; oversized batches are compacted, not truncated). effects:'full' returns every effect line; modifiers:'full' adds the raw requirement/argument chain (prefer civi6_modifiers for paging that chain). Units also carry upgrade/resource facts, districts carry buildings[]. For type='governor_promotion', governors[] is the authoritative owner list (from GovernorPromotionSets; never infer it from the id); for type='governor', promotions[] is that governor's kit.",
     parameters: {
       type: "object",
       properties: {
@@ -2355,6 +4367,7 @@ function entityTool(getKb) {
       },
       required: ["type"],
     },
+    ...RENDER.entity,
     execute: (args) => {
       assertNoSource(args);
       const kb = getKb();
@@ -2393,6 +4406,7 @@ function modifiersTool(getKb) {
       },
       required: ["type", "id"],
     },
+    ...RENDER.modifiers,
     execute: (args) => {
       assertNoSource(args);
       return getKb().modifiers(args.type, args.id, { offset: args.offset, limit: args.limit });
@@ -2404,7 +4418,7 @@ function sqlTool(getKb) {
   return makeTool({
     name: "civi6_sql",
     description:
-      "Read-only SQL (SELECT/WITH/EXPLAIN/PRAGMA) against the active ruleset DB for exact numeric checks and table introspection. Returns raw rows, not effect descriptions; use civi6_entity for player-facing effects. Governor ownership: query v_governor_promotion (or civi6_entity type='governor_promotion'); promotion ids keep vanilla prefixes, so the id text is NOT the owner.",
+      "Read-only SQL (SELECT/WITH/EXPLAIN/PRAGMA) against the active ruleset DB — a last-resort escape hatch for numbers no curated tool exposes. Call civi6_schema first if you do not know the table/column names; a failing query returns the candidates and the columns instead of a bare error. Returns raw rows, not effect descriptions; use civi6_entity for player-facing effects. Governor ownership: query v_governor_promotion (or civi6_entity type='governor_promotion'); promotion ids keep vanilla prefixes, so the id text is NOT the owner.",
     parameters: {
       type: "object",
       properties: {
@@ -2413,9 +4427,31 @@ function sqlTool(getKb) {
       },
       required: ["sql"],
     },
+    ...RENDER.sql,
     execute: (args) => {
       assertNoSource(args);
       return getKb().sql(args.sql ?? "", args.limit);
+    },
+  });
+}
+
+function schemaTool(getKb) {
+  return makeTool({
+    name: "civi6_schema",
+    description:
+      "Table/view catalog: names, row counts and column names/types. Use it once before writing civi6_sql, or when a SQL error says a table/column does not exist. q matches table names and column names; leave it out only when you really want the shortlist.",
+    parameters: {
+      type: "object",
+      properties: {
+        q: { type: "string", description: "Substring matched against table names and column names, e.g. 'promotion' or 'GameSpeed'." },
+        limit: { type: "integer", description: "Max tables, 1-40. Default 20." },
+      },
+      required: [],
+    },
+    ...RENDER.schema,
+    execute: (args) => {
+      assertNoSource(args);
+      return getKb().schema({ q: args.q, limit: args.limit });
     },
   });
 }
@@ -2476,21 +4512,14 @@ function readMetaSummary(file) {
 }
 
 function buildReasoningPrompt() {
-  return `## Civ6 推理契约（算账优先，结构决定功能）
-“怎么玩 / 时代规划 / 取舍”类问题必须先取结构、再回答；结构来自 civi6_plan(view='focus')，不是记忆。
-回答必须包含以下 6 段，缺一段视为未回答：
+  return `## Civ6 工作协议（一次取数，公式算账）
+“怎么玩 / 时代规划 / 取舍”类问题，数据只取一次，其余全靠公式与账本。
 
-1. 约束方程：逐时代引用 budget[].required / supply / gap / perTurn，按 gap 从大到小；不许只给节点成本，也不许把未被约束引用的产出当目标。
-2. 供给计划：引用 supply[]（来源 / 每回合 / 到位回合 / 价格 / dataRef），说清靠哪些建筑、政策、教条、地块、伟人或总督达成；供给是积分不是常数。总督来源必须引用 civi6_entity(type='governor_promotion') 返回的 governors 归属，不得从晋升 ID 前缀推断。
-3. 砍单：只要某时代 gap>0，就必须引用 cut[] 的前 N 项：省多少、代价是什么、目标推迟几回合（slipTurns）；砍完仍不够时直接说“该爆发点不可行”，并给出最早可行时代。
-4. 情景：至少引用 scenario[] 的 base 与一个不利情景，说明哪些决策 invariant、哪些 contingent 以及翻盘触发条件（robustness[]）。
-5. 路径：只引用 path.onPath / path.detour / path.dead；死路必须带 why；不得凭记忆增删节点。
-6. 验收：每时代 checkpoint 数值 + 未达标后的下一步。
-
-规则：
-- 目标层未收录或 budget 为空时，明说“数据层未解析/未收录”，改用 view='ladder' 并标注为通用模型；不许凭记忆补时间轴。
-- 联机速度：tech/civic 成本按 speed 缩放，回合窗口按 250/500 缩放；引用 cost 时必须用工具返回的数值，不得心算换算。
-- 约束紧张度、供给速率、slipTurns 都是决策模型估计，不是游戏规则数值；引用时保留 confidence/source。`;
+1. 第 1 步（同一回合并行，四片合起来才是完整数据包）：civi6_instance({ civ, leader, speed, difficulty, section:'core' }) 与 section:'content-a' / 'content-b' / 'content-c'。core.manifest 列出各片体积与还缺哪片；它只由硬约束决定，包含可选项全集（句柄 + 名称 + 时代 + 成本 + 公式摘要）、前置关系、中立索引、GlobalParameters 子集与文明套件全文。换胜利线不重新取数；换文明或速度才重新取。
+2. 包到手后不做探索性取数：按 indexes 定位句柄、按句柄读行。只有需要某实体的官方逐字全文时才调用 civi6_entity 一次。
+3. 算账一律调用 civi6_eval：builds 给供给侧、gates 给需求侧（会展开前置闭包并计成本），返回 ledger（每币种 required / requiredPerTurn / supplyPerTurn / gap / verdict）、cut（砍单与 slipTurns）、scenarios（low/base/high）与 composition（谁贡献了多少，带 fx_id）。禁止心算，禁止把描述文字当数字。
+4. 数据层没有的量（包内 omitted 列出的，如黄金时代/时代得分、伟人个体、真实对手）一律写“数据层未收录”，不得用记忆补。
+5. 答案固定 6 段：约束方程 / 供给计划 / 砍单 / 情景 / 路径 / 验收；每段引用 civi6_eval 字段与句柄，末行“数据依据：BBG 7.5.1 / <entity ids 或句柄>”。`;
 }
 
 function buildRulesetPrompt(ruleset, build) {
@@ -2504,10 +4533,10 @@ function buildRulesetPrompt(ruleset, build) {
 本会话唯一规则：${label}（${ruleset.id}，构建于 ${builtAt}）。
 - 风云际会（Gathering Storm）是本规则的基础资料片，不是另一个可选数据源；本 KB 没有“无资料片基础版”。
 - 所有文明6数值、成本、产出、前置、效果描述必须来自本轮 civi6_* 工具返回。禁止用预训练知识、禁止直接读 data/*.sqlite、禁止复用本会话中没有工具出处的旧结论。
-- 效果描述逐字引用 effects[].text_zh；不得改写数字或心算。
+- 数值纪律：凡是数（产出/成本/加成/伤害）一律来自工具返回的结构化字段或公式行（dimension + op + value）；文本只用于说明与审计，禁止从文字心算。
 - 内部 ID 的前缀不编码归属：例如 GOVERNOR_PROMOTION_EDUCATOR_* 在 BBG 里可能属于其他总督。总督/晋升归属只认 civi6_entity 返回的 governors[]（列表/详情）或 v_governor_promotion 视图，禁止按 ID 前缀、名称片段或旧对话推断。
 - effects 是已解析的权威效果；unresolved 只是原始机制审计数据。用户问效果时只引用 effects；若追问隐藏/完整机制且涉及 unresolved，再说明“数据层未解析”，不得补写。
-- civi6_plan 的数值是决策模型估计，不是游戏规则数值；引用时保留 confidence/source。
+- 决策数值来自 civi6_eval 的公式组合与计划带（empirical/rule），引用时保留 confidence/source。
 - 回答含文明6事实时，末尾加：数据依据：${label} / <entity ids>。
 - 用户要另一套规则时，说明需修改插件配置 ruleset 并重载，不能按调用切换。${excluded.length ? `\n- 可选子模组未启用：${excluded.join("、")}。` : ""}`;
 }
@@ -2663,11 +4692,13 @@ export function apply(ctx, config = {}) {
     });
   }
 
+  // Model-facing surface (5 tools): data once (instance), arithmetic (eval),
+  // verbatim text on demand (entity), audit escape hatch (sql), provenance (meta).
+  // The old exploration surface (plan / search / entities / modifiers / schema)
+  // is no longer registered: it existed to compensate for the missing packet.
   ctx.tools.register(metaTool(getKb));
-  ctx.tools.register(planTool(getKb));
-  ctx.tools.register(searchTool(getKb));
-  ctx.tools.register(entitiesTool(getKb));
-  ctx.tools.register(modifiersTool(getKb));
+  ctx.tools.register(instanceTool(getKb));
+  ctx.tools.register(evalTool(getKb));
   ctx.tools.register(entityTool(getKb));
   ctx.tools.register(sqlTool(getKb));
 

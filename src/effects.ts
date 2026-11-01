@@ -1,6 +1,7 @@
 import type { KnowledgeDb } from "./db.js";
 import type { DataSource } from "./config.js";
 import { SPECS, type EntitySpec } from "./entities.js";
+import { buildFormulas, buildTableFormulas, type FormulaStats } from "./formula.js";
 
 /**
  * Build-time effect layer.
@@ -16,7 +17,7 @@ import { SPECS, type EntitySpec } from "./entities.js";
  * modifier data. The runtime never invents text for those gaps.
  */
 
-export const EFFECT_SCHEMA_VERSION = 1;
+export const EFFECT_SCHEMA_VERSION = 2;
 
 export interface EffectSource {
   table: string;
@@ -87,6 +88,7 @@ export interface EffectStats {
   unresolved: number;
   modifierTexts: number;
   requirementTexts: number;
+  formulas: FormulaStats;
 }
 
 interface TextResult {
@@ -939,6 +941,9 @@ const DIRECT_MODIFIER_TABLE: Record<string, { table: string; fk: string; modifie
   // Governor promotion text is official, but some effects live only in the
   // modifier chain; keep them auditable in the same card.
   governor_promotion: { table: "GovernorPromotionModifiers", fk: "GovernorPromotionType", modifierCol: "ModifierId" },
+  // Unit promotion effects are attached through UnitPromotionModifiers; the
+  // official Description still carries the player-facing sentence.
+  promotion: { table: "UnitPromotionModifiers", fk: "UnitPromotionType", modifierCol: "ModifierId" },
 };
 
 function directModifierIds(
@@ -1371,12 +1376,27 @@ export function buildEffectCards(
     unresolved: 0,
     modifierTexts: 0,
     requirementTexts: 0,
+    formulas: {
+      modifiers: 0,
+      formulas: 0,
+      tableFormulas: 0,
+      owners: 0,
+      byTemplate: {},
+      unparsed: 0,
+      unparsedTypes: [],
+      requirementSets: 0,
+      requirementLeaves: 0,
+      unsupportedLeaves: 0,
+    },
   };
 
   kb.begin();
   try {
     stats.modifierTexts = buildModifierText(kb, zh, en);
     stats.requirementTexts = buildRequirementText(kb, zh, en);
+    // The formula layer is built inside the same transaction: a card without
+    // its executable formula would be back to "prose only".
+    stats.formulas = buildFormulas(kb, { inTransaction: true });
     const ins = kb.db.prepare(
       `INSERT INTO effect_cards
         (card_id, owner_kind, owner_id, description_zh, description_en, attributes_json,
@@ -1481,6 +1501,10 @@ export function buildEffectCards(
         stats.unresolved += card.unresolved.length;
       }
     }
+    // Table effects (flat yields, GPP, citizen/per-era yields) become formulas
+    // too, so a building is never "prose only" while its modifier siblings are
+    // executable.
+    stats.formulas.tableFormulas = buildTableFormulas(kb, { inTransaction: true });
     kb.commit();
   } catch (error) {
     try {
@@ -1502,6 +1526,23 @@ export function buildEffectCards(
     unresolved: stats.unresolved,
     modifierTexts: stats.modifierTexts,
     requirementTexts: stats.requirementTexts,
+    // "one description, one formula": the coverage of the executable layer is
+    // part of the build record, so a drop is visible instead of implied.
+    formulaCoverage: {
+      modifiers: stats.formulas.modifiers,
+      formulas: stats.formulas.formulas,
+      tableFormulas: stats.formulas.tableFormulas,
+      owners: stats.formulas.owners,
+      unparsed: stats.formulas.unparsed,
+      coverage: stats.formulas.modifiers
+        ? Math.round((stats.formulas.formulas / stats.formulas.modifiers) * 1000) / 1000
+        : 0,
+      byTemplate: stats.formulas.byTemplate,
+      unparsedTypes: stats.formulas.unparsedTypes.slice(0, 40),
+      requirementSets: stats.formulas.requirementSets,
+      requirementLeaves: stats.formulas.requirementLeaves,
+      unsupportedLeaves: stats.formulas.unsupportedLeaves,
+    },
   });
   return stats;
 }

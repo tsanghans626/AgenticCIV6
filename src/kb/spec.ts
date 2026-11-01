@@ -195,6 +195,20 @@ export interface DeadEndSpec {
   why: string;
 }
 
+/**
+ * Entity the answer needs verbatim (official text) but that is not already part
+ * of the path/supply graph, e.g. the beliefs and religious units of a religion
+ * opening. Authored per objective and returned inline by `civi6_plan` so the
+ * model does not have to rediscover them with search/SQL.
+ */
+export interface EvidenceSpec {
+  /** one of the civi6 entity types (unit/building/district/belief/...) */
+  kind: string;
+  id: string;
+  /** why the answer needs this entity; shown in the brief */
+  why?: string;
+}
+
 export interface DetourSpec {
   groupId: string;
   ids: string[];
@@ -309,6 +323,11 @@ export interface ObjectiveSpec {
   feasibility?: "strict" | "report";
   deadEnds?: DeadEndSpec[];
   detours?: DetourSpec[];
+  /** Extra verbatim evidence for the answer (beyond path/supply/civ uniques). */
+  evidence?: EvidenceSpec[];
+  /** Topics this objective needs but the data layer does not model; the answer
+   *  must mark them as 数据层未收录 instead of reconstructing them from memory. */
+  unmodeled?: string[];
   eraFocusOverrides?: EraFocusOverrideSpec[];
   assumptions?: Record<string, unknown>;
 }

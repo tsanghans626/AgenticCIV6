@@ -199,6 +199,21 @@ export const SPECS: EntitySpec[] = [
     docTables: [],
     modifierResolver: "direct",
   },
+  {
+    // Unit promotions: a class/level/column tree with its own prerequisite
+    // chain and localized text. Without this entity the model had to rebuild
+    // the tree with PRAGMA + LocalizedText queries during a normal answer.
+    type: "promotion", table: "UnitPromotions", pk: "UnitPromotionType", loc: "LOC_PROMOTION_",
+    stats: ["Level", "Column", "PromotionClass"],
+    related: [
+      { table: "UnitPromotionPrereqs", fk: "UnitPromotion" },
+      { table: "UnitPromotionModifiers", fk: "UnitPromotionType" },
+    ],
+    docTables: [
+      { table: "UnitPromotionPrereqs", fk: "UnitPromotion", valueCol: "PrereqUnitPromotion", mode: "entity" },
+    ],
+    modifierResolver: "direct",
+  },
 ];
 
 /**

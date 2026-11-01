@@ -81,6 +81,41 @@ function checkDb(file, source) {
       assert.ok(scalar(db, "SELECT COUNT(*) AS n FROM modifier_text").n > 0, "modifier_text 为空");
     });
 
+    // "One description, one formula": arithmetic must be executable, not prose.
+    // Coverage is a build-record field, so a regression shows up here instead of
+    // silently degrading answers into mental arithmetic.
+    check("公式层覆盖 ≥85% 且有表格公式", () => {
+      const row = scalar(db, "SELECT value FROM _meta WHERE key = 'effects'");
+      const e = JSON.parse(row.value);
+      const cov = e.formulaCoverage;
+      assert.ok(cov, "缺少 formulaCoverage");
+      // The locked runtime ruleset carries the stricter bar; vanilla is kept
+      // buildable but is not the answering target.
+      const minCoverage = source === "bbg" ? 0.85 : 0.75;
+      assert.ok(cov.coverage >= minCoverage, `公式覆盖 ${cov.coverage} < ${minCoverage}（${source}）`);
+      assert.ok(cov.unparsed >= 0, "unparsed 未记录");
+      assert.ok(cov.tableFormulas > 0, "缺少表格公式");
+      const n = scalar(db, "SELECT COUNT(*) AS n FROM kb_formula").n;
+      const modifiers = scalar(db, "SELECT COUNT(*) AS n FROM Modifiers").n;
+      assert.ok(n >= Math.floor(modifiers * 0.7), `kb_formula ${n} 行 / Modifiers ${modifiers}`);
+      const owner = scalar(db, "SELECT COUNT(*) AS n FROM kb_formula_owner").n;
+      assert.ok(owner >= Math.floor(n * 0.5), `kb_formula_owner ${owner} 行 / 公式 ${n}`);
+    });
+
+    check("图书馆有可执行公式（描述与公式同源）", () => {
+      const rows = db
+        .prepare(
+          `SELECT f.desc AS d, f.dimension AS dim, f.value AS v
+             FROM kb_formula f
+            WHERE f.fx_id LIKE 'fx:t:building:BUILDING_LIBRARY:%'`,
+        )
+        .all();
+      assert.ok(rows.length >= 2, `图书馆公式 ${rows.length} 条`);
+      const science = rows.find((r) => r.dim === "science_per_turn");
+      assert.equal(science?.v, 2, `图书馆科技公式 ${science?.v}`);
+      assert.match(String(science?.d), /科技/, `图书馆描述 ${science?.d}`);
+    });
+
     check("每个 Beliefs 行都有非空效果卡", () => {
       const rows = db.prepare("SELECT BeliefType FROM Beliefs").all();
       assert.ok(rows.length > 0, "Beliefs 为空");

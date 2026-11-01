@@ -15,7 +15,7 @@
 
 ```
 dsh-plugin/            # DSH 插件本体（运行时，零 npm 依赖，直接用 node:sqlite 读库）
-  index.js             #   注册 7 个工具 + 单规则锁定 + 系统提示 + 严格 guard + 效果卡读取
+  index.js             #   注册 8 个工具 + 单规则锁定 + 系统提示 + 严格 guard + 效果卡读取
   cordis.patch.yml     #   注入配置（ruleset + 两个 dbPaths）
   package.json / locale/ / icon.svg
 src/                   # 构建管线（把游戏/BBG 数据摄取成 SQLite）
@@ -83,7 +83,11 @@ npm run verify
 npm run verify:effects
 npm run kb:verify
 
-# 7. 由 DeepSeek Harness 加载 dsh-plugin/（cordis.patch.yml 锁定 ruleset: bbg）
+# 7. 轨迹体检：步数 / 调用 / 输出 token / 截断 / 丢实体 / 重复取数
+npm run sessions:analyze
+npm run sessions:analyze -- "C:\Users\<you>\.dsh\sessions\--D-Code-AgenticCIV6--\session-xxxx"
+
+# 8. 由 DeepSeek Harness 加载 dsh-plugin/（cordis.patch.yml 锁定 ruleset: bbg）
 ```
 
 脚本用 `node --import ./scripts/ts-loader.mjs` 直接运行 TypeScript，不依赖 tsx/esbuild（`npm run typecheck` 仍需要 `typescript`）。
@@ -110,7 +114,8 @@ npm run kb:verify
   - 没有 Summary 的建筑/教条/政策/特性 Modifier 不会被编造成效果句；它们进入 `unresolved`，`effects` 只保留官方描述和直接数值。
 - **系统提示**：插件通过 `ctx.systemPrompt.section()` 在每次请求中声明唯一规则、禁止直接读库、要求逐字引用 `effects[].text_zh`。
 - **严格 guard**：`strictGrounding: true` 时，`pwsh`/`bash` 命令若包含 Civ6 数据库路径会被拒绝；旧会话传 `source` 也会被拒绝。
-- **工具层**：7 个工具都不再接受 `source`。`civi6_entity` 默认返回效果卡；`civi6_entities` 支持 `effects:true`、`beliefClass`；`civi6_search` 的 `type` 包含 `belief`；`civi6_plan` 明确标注是决策模型估计。
+- **工具层**：8 个工具都不再接受 `source`。`civi6_entity` 默认返回效果卡；`civi6_entities` 支持 `effects:true`、`beliefClass`、`promotionClass`；`civi6_plan(view='focus')` 返回自足 brief（evidence/mechanics/workPlan/outline/unknowns）；`civi6_schema` 支持列名优先检索。
+- **工作协议**：先取 brief；`coverage.complete=true` 时不再检索，只按 `workPlan.groups` 补缺口；答案按 `outlineMarkdown` 的 6 段落笔；`unknowns` 中的主题标注“数据层未收录”。工具返回的 `_workBudget` 显示已超出计划多少次调用。
 
 ### 切换规则
 
@@ -152,21 +157,33 @@ Windows 上插件会保持数据库的只读连接。重建标准库时若文件
 
 ## 插件工具
 
-插件注册 7 个查询工具（`civi6_*`）。**所有工具都没有 `source` 参数**；当前规则由插件配置 `ruleset` 固定。旧会话/旧客户端传 `source` 会被拒绝。
+插件注册 **5 个查询工具**（`civi6_*`），模型面只保留"一次取数 + 公式算账 + 按需全文 + 审计"。**所有工具都没有 `source` 参数**；当前规则由插件配置 `ruleset` 固定。
 
 | 工具 | 说明 |
 | --- | --- |
-| `civi6_meta` | 当前规则（`ruleset`/`locked`）、构建元信息、实体类型与行数、效果覆盖率、`kb` 构建/校验状态；`verbose:true` 才返回完整表清单 |
-| `civi6_plan` | **决策切面**：`view='focus'` 返回目标层（objective）+ 约束方程（按 tightness 排序）+ 关键路径（在路/绕路/死路）+ 每时代 3 条焦点（why/代价/替代/放弃条件/验收）；`burst`/`ladder`/`check`/`civ` 为原有切面；`speed='online'` 按速度档缩放回合与科技/市政成本。数值是决策模型估计，不是游戏规则数值 |
-| `civi6_search` | BM25 全文检索（中英，效果文本已进入实体文档）；`scope:'entity'` 查实体，`scope:'plan'` 查预计算决策卡片，`scope:'all'` 合并 |
-| `civi6_entities` | 某类型实体列表：`id`/`name`/`name_zh`/关键属性；`effects:true` 加一行效果；`type:'belief'` 可用 `beliefClass` 过滤 |
-| `civi6_entity` | 实体详情：单 id 或 `ids:[...]` 批量，支持中文名自动解析；默认返回效果卡，`effects:'full'` 返回全部效果，`modifiers:'summary'\|'full'` 才展开原始修饰符链；`governor_promotion` 返回 `governors[]` 归属 |
-| `civi6_modifiers` | 原始修饰符/需求集审计链，分页（`offset`/`limit`） |
-| `civi6_sql` | 只读 SQL（仅 SELECT/WITH/EXPLAIN/PRAGMA）；原始行查询，不用于效果描述。总督归属查 `v_governor_promotion`，不要按晋升 id 前缀推断 |
+| `civi6_meta` | 当前规则（`ruleset`/`locked`）、构建元信息、实体类型与行数、效果/公式覆盖率、速度档（`speedProfiles`：回合数 / 成本百分比）；`verbose:true` 才返回完整表清单与构建加载顺序 |
+| `civi6_instance` | **唯一取数入口，objective-free**：只由硬约束（文明/领袖/速度/难度）决定，按**分片**交付（单条工具结果被传输层截在 ≈50,000 字符，整包 ≈90KB 必须分页）。同一回合并行取四片才是完整包：`core`（实例参数 + 文明套件全文 + 663 条前置边 + 中立索引 + `params` 全局参数 + 伟人职业/基础成本 + 单位行动）/ `content-a`（科技·市政·建筑·区域·单位·项目 + 灵感触发）/ `content-b`（政策·政体·信条，`fx` 为空时给 `d` 短描述）/ `content-c`（改良·资源·晋升，同上）。`core.manifest` 列出各片体积与还缺哪片；任一分片超 44,000 字符**直接报错**，不交给传输层截断。实测 `core` 36.7KB / `a` 32.7KB / `b` 17.6KB / `c` 20.7KB |
+| `civi6_eval` | **确定性算账**，不取数：供给侧 `builds`（按公式求和，`per=pop/era` 自动乘份数）→ `metrics`（add/percent/supply + 贡献构成）；需求侧 `gates`（展开前置闭包、按币种计成本）→ `ledger`（required/requiredPerTurn/supplyPerTurn/gap/verdict）、`cut`（砍单 + `slipTurns`）、`scenarios`（low/base/high）、`path` 与 `deadline`（`kb_era_window.turn_hi`，保留 confidence） |
+| `civi6_entity` | 实体详情：单 id 或 `ids:[...]` 批量（**不丢请求项**），中文名自动解析；默认效果卡，`effects:'full'` 全部效果，`modifiers:'summary'\|'full'` 才展开原始修饰符链；`governor_promotion` 返回 `governors[]` 归属；`unit` 额外返回 `upgrade`/`resource`，`district` 额外返回 `buildings[]`。**只用于需要官方逐字全文时** |
+| `civi6_sql` | 只读 SQL（仅 SELECT/WITH/EXPLAIN/PRAGMA）的审计逃生口；缺表/缺列时返回候选表与候选列。总督归属查 `v_governor_promotion`，不要按晋升 id 前缀推断 |
 
-实体类型：`unit` `building` `district` `civilization` `leader` `trait` `technology` `civic` `policy` `government` `improvement` `resource` `terrain` `feature` `greatperson` `belief` `governor` `governor_promotion`。
+已下线的探索面：`civi6_plan` / `civi6_search` / `civi6_entities` / `civi6_modifiers` / `civi6_schema`。它们存在的原因（目标层命中才有数据包、按实体逐次取数）已被 `civi6_instance` 取代；对应内部实现仍作为 QA/预设 API 保留，但不再暴露给模型。
+
+实体类型：`unit` `building` `district` `civilization` `leader` `trait` `technology` `civic` `policy` `government` `improvement` `resource` `terrain` `feature` `greatperson` `belief` `governor` `governor_promotion` `promotion`。
 
 > 总督晋升的归属来自 `GovernorPromotionSets`（多对多），不是 id 前缀：BBG 会把晋升改挂到别的总督而保留原 id。工具返回 `governors[]`；零归属时按“数据层未解析”处理。
+
+### 公式层（`kb_formula`）：一份描述、一份公式
+
+效果事实层（`effect_cards`）回答“文本怎么说”，公式层回答“到底怎么算”。构建期把每条 modifier 与每条表格效果落成一行：
+
+```
+scope + dimension + op + value (+ per + condition)
+```
+
+`desc` 由同一绑定渲染（“本城科技+2”），所以描述与公式不可能漂移。当前 BBG 覆盖 **85.2%** 的 modifier（3,979/4,670），另有 814 条表格公式（`Building_YieldChanges`、GPP、巨作槽等），合计 **4,282+ 行**；未绑定的 691 行按 `ModifierType` 逐条记入 `_meta.effects.formulaCoverage.unparsedTypes`，绝不猜。
+
+曲线型公式（伤害/成长阈值）的参数取自 `GlobalParameters`（如 `COMBAT_BASE_DAMAGE=30`、`CITY_GROWTH_MULTIPLIER=8`），函数形状标 `empirical` 并保留 confidence；`model/*.md` 只作思路材料，不再作为数值来源（其旧口径 24 与 DB 的 30 冲突即为证据）。
 
 ### 决策知识层（`kb_*`）
 
@@ -175,21 +192,18 @@ Windows 上插件会保持数据库的只读连接。重建标准库时若文件
 ```
 L1 原子层   kb_effect / kb_cost / kb_unlock / kb_closure / kb_node
 L2 轴       kb_dimension / kb_victory / kb_era_window / kb_speed_profile
-L2b 目标层  kb_objective（“T* 前必须为真的条件”，驱动下游）
-L3 路径层   kb_path / kb_path_node（on_path / detour 带价 / dead 带原因）
-L3b 约束层  kb_constraint / kb_constraint_lever（tightness、绑定排名、杠杆）
-L3c 焦点层  kb_era_focus（每时代 3 条：为什么/代价/替代/放弃条件）
-L3 切面     kb_plan / kb_target / kb_budget / kb_check / kb_derivation
+L2' 公式层  kb_formula / kb_formula_owner / kb_requirement_set（一描述一公式，构建期生成）
+L3 切面     kb_plan / kb_target / kb_budget / kb_check / kb_derivation（计划带与检查点）
 L4 文明     kb_civ_profile / kb_civ_entity_map / kb_civ_delta / kb_civ_capability
 L5 检索     kb_card + v_kb_* 视图 + search_docs(type='card')
 ```
 
-推理链是单向的：`objective → path → constraint → era_focus → target/check`，工具只读表，构建期断言保证“焦点必须挂约束、死路必须写原因、绑定排名必须按紧张度”。
+**已退役：作者目标层**（`kb/objectives/*`、`kb_objective` / `kb_path*` / `kb_constraint*` / `kb_era_focus` / `kb_supply_source` / `kb_ledger` / `kb_cut` / `kb_scenario` / `kb_robustness`）。原因是它把"取数"绑在"优化目标"上：只有被手写过的（文明×胜利×速度）才有数据包，其余问题只能退化成探索。现在数据由 `civi6_instance` 按硬约束一次给完，账本由 `civi6_eval` 在查询期按公式现算；这些表保持为空，`kb:verify` 会显式报告"没有目标层"而不是让旧行驱动答案。
 
 - **水平切面**：`kb_target.slice_kind='burst'`，某个胜利爆发点的硬门 + 前置闭包 + 瞬时产能/存量。
-- **垂直切面**：`kb_target.slice_kind='era'`，从爆发点反推的 8 个时代软目标带 + 检查点。
+- **垂直切面**：`kb_target.slice_kind='era'`，从爆发点反推的 8 个时代软目标带 + 检查点（`civi6_eval` 的 `demand` 直接读它）。
 - 两者共用同一张状态表、同一维度字典、同一来源/置信度模型；差异只在约束语义与检索载荷。
-- 数字从当前 DB 现算，意图/锚点来自 `kb/plans/*.json`；构建期写入 `formula`/`provenance`，`npm run kb:verify` 可追溯与回归。
+- 数字从当前 DB 现算：产出/成本走 `kb_formula` 与原始 Content 表，阈值/带来自 `kb/plans/*.json`；`npm run kb:verify` 可追溯与回归。
 
 示例：
 
@@ -230,9 +244,21 @@ config:
 单次工具调用的成本由三部分组成，插件对三者都做了约束：
 
 1. **执行的 SQL 条数**：语句按 SQL 文本缓存（不再每次 `prepare`），取数改为批量 `IN (...)`。效果卡按 `card_id` 一次点查，不再运行期拼接 Modifier 文本。
-2. **返回体积**：默认只回策展字段、去掉空列、紧凑 JSON，并有 12k 字符预算兜底（超限按数组截断并标注）。`civi6_entity` 默认效果最多 12 条，`civi6_entities(effects:true)` 每行最多 3 条，可用 `effectLimit` 调整。
+2. **返回体积与完整性**：默认只回策展字段、去掉空列、紧凑 JSON。超过预算时**只压缩审计字段**（`row`/`coverage`/`unresolved`/`modifiers`/`derivations`/`related` 行数），**绝不少返回请求的实体或契约引用的数组**（`items`、`path.onPath`、`budget`、`supply`、`cut`、`scenario`、`eras`）。每次压缩都在 `_budget` 里写明 `limit`、`dropped` 和**该工具真实存在**的恢复参数（`detail`/`view`/`era`/`ids`/`offset`）。
 3. **检索开销**：`search_terms` / `search_postings` / `search_docs.len` 构建期算好，查询只读倒排表；效果文本已加入实体文档，无需二次 join。
-4. **决策切面**：`civi6_plan` 只做 1–5 次点查（`kb_plan` / `kb_target` / `kb_budget` / `kb_check` / 文明 delta），不跨原始表 join；实测热态 p95 ≈ 1–2ms、summary payload ≈ 8KB。`npm run kb:verify` 会跑 100 次基准并断言。
+4. **一次取数 + 公式算账**：`civi6_instance` 按硬约束给出 979 行，但**必须分 4 片**（整包 ~90KB 会被传输层截在 ≈50KB，实测两次会话都切在 49,930 字符且 JSON 在 24.8KB 处损坏）。热态首片 ~40ms / ~60 条 SQL，其余分片复用同一份缓存数据。`civi6_eval` 在查询期组合公式（账本/砍单/情景，无取数）。
+
+| 会话 | 数据面 | steps | 工具调用 | 输出 token | 墙钟 |
+| --- | --- | --- | --- | --- | --- |
+| `f115a67d`（旧：focus 报错 3 次后探索） | plan/search/entities/entity 共 74 次 | 23 | 74 | 48,222 | 341s |
+| `24f2827c`（分片前：单包 90KB 被截断） | instance ×1（截断）→ sql ×40 / entity ×8 | 31 | 50 | 57,256 | 7.2m |
+| `2f8fada4`（分片前，靠 grep 读 spill 临时文件） | instance ×1（截断）+ grep spill + eval ×3 | 5 | 6 | 8,533 | 51.7s |
+| `6137a841`（分片前模块，改用 kinds 分片） | instance ×4（首片 49,930 溢出后改 kinds 重试）+ eval ×6 | 6 | 11 | 8,867 | 56.3s |
+
+> 注 1：`2f8fada4` 的 51.7s **依赖 grep spill 文件**（模型绕过了截断），是旁路不是结构收益。
+> 注 2：`6137a841` 跑的是**尚未重载的旧模块**（调用参数带 `kinds`、首片仍触发 49,930 溢出即为证据），所以它验证的是"子包恰好 <50KB 时可行"，**不是**分片补丁本身。分片补丁（`section` 必填 + 每片 ≤44KB + 超限报错）已通过直接调用与 `verify-plugin` 断言，端到端复测需重载插件后重跑同一问题。
+
+5. **轨迹可观测**：`npm run sessions:analyze` 直接读 DSH 的 `session.v4.jsonl.zstd`，输出步数、调用/步、输出 token（并拆分 think/text 字符）、被截断载荷、被丢实体、重复取数与最慢步骤。先量再改——工具执行通常只占墙钟的千分之几；例如 a4d4 工具 0.525s / 244s，e94 工具 0.459s / 342s，真正的成本是往返次数和输出 token。
 
 ## 数据范围与加载顺序
 

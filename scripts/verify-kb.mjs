@@ -3,6 +3,7 @@ import { existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { DatabaseSync } from "node:sqlite";
+import { SPECS } from "../dsh-plugin/index.js";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const vanillaFile = process.env.CIVI6_DB_PATH?.trim() || join(root, "data", "civi6.sqlite");
@@ -166,8 +167,27 @@ function checkKb(file, source) {
 
     // ---- v2 reasoning shape ------------------------------------------------
     if (stats.objectives > 0) {
-      const objectives = db.prepare("SELECT objective_id, burst_era FROM kb_objective").all();
+      const objectives = db.prepare("SELECT objective_id, burst_era, win_capsule FROM kb_objective").all();
+      const specByType = new Map(SPECS.map((spec) => [spec.type, spec]));
       for (const o of objectives) {
+        const capsule = o.win_capsule ? JSON.parse(o.win_capsule) : {};
+        check(`${o.objective_id}: brief 证据可解析`, () => {
+          const evidence = Array.isArray(capsule.evidence) ? capsule.evidence : [];
+          for (const item of evidence) {
+            const spec = specByType.get(item?.kind);
+            assert.ok(spec, `未知 evidence kind: ${item?.kind}`);
+            const exists = scalar(
+              db,
+              `SELECT COUNT(*) AS n FROM "${spec.table}" WHERE "${spec.pk}" = ?`,
+              item.id,
+            ).n;
+            assert.ok(exists > 0, `${item.kind}:${item.id} 不在 ${spec.table}`);
+          }
+          if (capsule.unmodeled !== undefined) {
+            assert.ok(Array.isArray(capsule.unmodeled), "unmodeled 必须是字符串数组");
+            assert.ok(capsule.unmodeled.every((u) => typeof u === "string"), "unmodeled 含非字符串");
+          }
+        });
         const constraints = db
           .prepare("SELECT constraint_key, required, supply_rate, window, tightness, binding_rank, waived_by FROM kb_constraint WHERE objective_id = ?")
           .all(o.objective_id);
@@ -378,7 +398,9 @@ function checkKb(file, source) {
 }
 
 async function benchmark(file, source) {
-  const { createKnowledgeBase } = await import(pathToFileURL(join(root, "dsh-plugin", "index.js")).href);
+  const { createKnowledgeBase, TOOL_BUDGETS } = await import(
+    pathToFileURL(join(root, "dsh-plugin", "index.js")).href
+  );
   const kb = createKnowledgeBase(file, source);
   try {
     for (let i = 0; i < 10; i++) kb.plan({ victory: "science" });
@@ -397,7 +419,9 @@ async function benchmark(file, source) {
     assert.ok(bytes < 12000, `${source}: payload=${bytes} > 12000`);
     const search = kb.search("科技胜利 爆发点", { scope: "plan", type: "card", full: true });
     assert.ok(search.count > 0, `${source}: plan search 无结果`);
-    // v2 reasoning view: Byzantium + online must fit the 12k payload budget.
+    // The reasoning view must fit the tool's plan budget without compaction:
+    // the tool may trim provenance, never `path.onPath` or the ledger.
+    const focusBudget = TOOL_BUDGETS?.plan ?? 18000;
     let focusBytes = 0;
     try {
       const focus = kb.plan({
@@ -420,7 +444,10 @@ async function benchmark(file, source) {
       assert.ok(focus.supply?.length >= 1, `${source}: 供给来源缺失`);
       assert.ok(focus.scenario?.some((s) => s.id === "base"), `${source}: 情景缺失`);
       assert.ok(Array.isArray(focus.cut), `${source}: 砍单缺失`);
-      assert.ok(focusBytes < 12000, `${source}: focus payload=${focusBytes} > 12000`);
+      assert.ok(
+        focusBytes < focusBudget,
+        `${source}: focus payload=${focusBytes} > ${focusBudget}（工具预算，压缩前必须放得下）`,
+      );
     } catch (error) {
       if (String(error.message).includes("目标层")) {
         console.log(`  ! ${source}: 无目标层，跳过 focus 基准`);

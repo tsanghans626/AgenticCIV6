@@ -940,11 +940,27 @@ export function buildObjectives(kb: KnowledgeDb, opts: EngineOptions): Objective
 
         const onPath = path.nodes.filter((n) => n.role === "on_path").length;
         const detour = path.nodes.filter((n) => n.role === "detour").length;
+        // The authored objective is modelled on the standard plan, but this row
+        // is the speed-specific variant. Keep the basis explicit so the header
+        // never says "standard" next to an online burst turn.
+        const objectiveAssumptions: Record<string, unknown> = { ...(objective.assumptions ?? {}) };
+        if (objectiveAssumptions.speed && objectiveAssumptions.speed !== speed.speed) {
+          objectiveAssumptions.basisSpeed = objectiveAssumptions.speed;
+        }
+        objectiveAssumptions.speed = speed.speed;
         insertObj.run(
           objectiveId, objective.victoryId, objective.civId ?? null, objective.leaderId ?? null,
           speed.speed, burstTurn, objective.burstEra, objective.title ?? null,
-          JSON.stringify({ gates: objective.gates, deadEnds: objective.deadEnds ?? [], detours: objective.detours ?? [] }),
-          JSON.stringify(objective.assumptions ?? {}), "rule", 0.65, opts.builtAt,
+          JSON.stringify({
+            gates: objective.gates,
+            deadEnds: objective.deadEnds ?? [],
+            detours: objective.detours ?? [],
+            // The answer-facing evidence list and the explicit "not modelled"
+            // topics ship with the objective so civi6_plan can inline them.
+            evidence: objective.evidence ?? [],
+            unmodeled: objective.unmodeled ?? [],
+          }),
+          JSON.stringify(objectiveAssumptions), "rule", 0.65, opts.builtAt,
         );
         insertPath.run(
           objectiveId, path.nodes.length, onPath, detour, path.dead.length,
