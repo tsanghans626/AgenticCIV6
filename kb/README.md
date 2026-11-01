@@ -309,10 +309,10 @@ npm run build:all        # 完整构建（ingest + 效果层 + KB + 索引）
   - `view='ladder'`：时代阶梯；指定 `era` 时只看该时代；
   - `view='check'`：可观测检查清单 + 补救；
   - `view='civ'`：文明基本盘/特色/推荐胜利线；
-  - `speed='online'`：按 `kb_speed_profile` 缩放回合与科技/市政成本（生产类成本不缩放）；
+  - `speed='online'`：按 `kb_speed_profile` 缩放回合窗与**所有币种**的成本（`Gamespeeds.CostMultiplier` 是全局倍数，`src/kb/path.ts` 的 `scaleCost` 对每个币种等比缩放，含 production）；
   - `detail='full'`：附带闭包、公式、置信度、来源。
 - `civi6_search({ q, scope:'plan' })`：检索预计算卡片，返回完整 `body`。
-- 模型面只保留 `civi6_instance`（一次取数，行内已连接）/ `civi6_eval`（算账）/ `civi6_entity`（官方全文与修饰符链）/ `civi6_meta`（溯源）。`civi6_sql` / `civi6_schema` / `civi6_modifiers` 等原始数据工具已下线：它们让"包不够用"永远有退路，实测会把 4 片包变成 62 次 SQL。
+- 模型面只保留三个工具：`civi6_instance`（一次取数，按「数据类」交付，每类自带 `definition`/`whenToUse`）/ `civi6_eval`（算账）/ `civi6_meta`（溯源）。`civi6_entity` / `civi6_sql` / `civi6_schema` / `civi6_modifiers` 等已下线：它们让"包不够用"永远有退路——实测 39 次单实体放大镜（session `17b596ad`）把 5 片的包变成了 46 次调用、38k 输出 token，而被放大镜取走的权威文本全量只有 ~51KB。
 
 ## 7. 验收
 
@@ -337,7 +337,7 @@ npm run build:all        # 完整构建（ingest + 效果层 + KB + 索引）
 
 - 目标层目前只覆盖已编写的文明（`kb/objectives/*.json`）；未覆盖的胜利线回退通用阶梯，`view='focus'` 会说明“未收录”而不是硬套。
 - 时代/城市/产出锚点来自神级标准速度经验值，标 `empirical`；`supplyRate` 是可校准字段，可用实局替换。
-- 速度档只缩放回合窗与科技/市政成本（`Gamespeeds.CostMultiplier`）；生产类成本不缩放，因此联机档的 `tightness` 与标准档可比。
+- 速度档缩放回合窗与**所有币种**的成本：`Gamespeeds.CostMultiplier` 是全局单列倍数，`path.ts:scaleCost` 对每个币种（含 production）等比缩放，回合按 `total_turns / 标准档 total_turns` 压缩（与 `engine.ts` 的 `turnScale` 同一算法）。模型面由 `civi6_instance` 的 `instance.costBasis` 与 `civi6_eval` 的 `basis` 回显，`civi6_eval` 的 `speed` 必填、给 `gates` 时 `eraId` 必填（没有默认时代）。标 `empirical`：数据只有一个全局倍数，逐项倍率与取整以游戏内为准。
 - 区域成本递增（`COST_PROGRESSION_NUM_UNDER_AVG_PLUS_TECH`）只记录模型名与参数，具体公式仍属“数据层未解析”，路径按基准价计并标 `cost_basis='progress'`。
 - 升级金币公式未解析（DB 只有 `UPGRADE_BASE_COST` / `UPGRADE_NET_PRODUCTION_PERCENT_COST`），因此金币不作为推导约束；需要时用 `constraints[].required` 手写。
 - 灵感（`Boosts`）只有 19 行后期数据，古代/古典行缺失；账本默认按 0% 抵扣（保守，只会高估需求），目标里不许手填比例。
@@ -345,6 +345,6 @@ npm run build:all        # 完整构建（ingest + 效果层 + KB + 索引）
 - 砍单的 `slip_turns` 是按当期供给速率折算的模型估计，不是精确排期；只用于比较“砍哪一项更划算”。
 - 文化/宗教/外交的终局是对手相对量，给区间而非假精确值。
 - 相邻加成按期望/规则描述，不按具体地图重算。
-- 效果事实层会解析 `ModifierStrings(Context='Summary')`；没有 Summary 的 Modifier（建筑/教条/政策/特性大量如此）进入 `unresolved`，不会被编造成效果句。`effects` 只保留官方描述和直接数值表，`civi6_entity` 默认不展开原始 Modifier 链。
+- 效果事实层会解析 `ModifierStrings(Context='Summary')`；没有 Summary 的 Modifier（建筑/教条/政策/特性大量如此）进入 `unresolved`，不会被编造成效果句。`effect_cards.effects` 只保留官方描述和直接数值表（政体的固有/积累加成同样从这里来），包内按行内联为 `eff`；原始 Modifier 链不再对模型开放。
 - 效果事实层不自动判定“官方描述 vs 表内数值”的语义冲突；两者都带 `authority`/`source` 暴露，引用时以官方描述为玩家可读文本、以表内数值为精确数字。
 - 只覆盖 18 个主流文明/领袖的 delta（另加拜占庭/巴兹尔的能力条目）；其余回退通用计划。
