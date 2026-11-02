@@ -23,11 +23,12 @@
     "kb:verify": "node scripts/verify-kb.mjs",
     "verify": "node scripts/verify-sources.mjs",
     "verify:parity": "node --import ./scripts/ts-loader.mjs scripts/verify-spec-parity.mjs",
-    "verify:plugin": "node scripts/verify-plugin.mjs",
+    "verify:plugin": "npm run pace:build && node scripts/verify-plugin.mjs",
     "verify:effects": "node scripts/verify-effects.mjs && npm run verify:parity && npm run verify:plugin",
     "sessions:analyze": "node scripts/analyze-session.mjs",
     "typecheck": "tsc --noEmit",
     "pace": "node --import ./scripts/ts-loader.mjs src/cli.ts pace",
+    "pace:build": "tsc -p tsconfig.pacing.json",
     "pace:verify": "node --import ./scripts/ts-loader.mjs scripts/verify-pacing.mjs"
   },
   "dependencies": {

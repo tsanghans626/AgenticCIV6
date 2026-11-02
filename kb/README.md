@@ -312,7 +312,7 @@ npm run build:all        # 完整构建（ingest + 效果层 + KB + 索引）
   - `speed='online'`：按 `kb_speed_profile` 缩放回合窗与**所有币种**的成本（`Gamespeeds.CostMultiplier` 是全局倍数，`src/kb/path.ts` 的 `scaleCost` 对每个币种等比缩放，含 production）；
   - `detail='full'`：附带闭包、公式、置信度、来源。
 - `civi6_search({ q, scope:'plan' })`：检索预计算卡片，返回完整 `body`。
-- 模型面只保留三个工具：`civi6_instance`（一次取数，按「数据类」交付，每类自带 `definition`/`whenToUse`）/ `civi6_eval`（算账）/ `civi6_meta`（溯源）。`civi6_entity` / `civi6_sql` / `civi6_schema` / `civi6_modifiers` 等已下线：它们让"包不够用"永远有退路——实测 39 次单实体放大镜（session `17b596ad`）把 5 片的包变成了 46 次调用、38k 输出 token，而被放大镜取走的权威文本全量只有 ~51KB。
+- 模型面保留五个工具：`civi6_instance`（一次取数，按「数据类」交付，每类自带 `definition`/`whenToUse`）/ `civi6_eval`（算账）/ `civi6_meta`（溯源）/ `civi6_pace`（基准函数集构建）/ `civi6_pace_eval`（按回合求值）。`civi6_entity` / `civi6_sql` / `civi6_schema` / `civi6_modifiers` 等已下线：它们让"包不够用"永远有退路——实测 39 次单实体放大镜（session `17b596ad`）把 5 片的包变成了 46 次调用、38k 输出 token，而被放大镜取走的权威文本全量只有 ~51KB。
 
 ## 7. 验收
 

@@ -9,7 +9,7 @@ AgenticCIV6 的核心是一个宿主无关的知识库与查询契约；"怎么�
 ```
 ┌──────────────────────────── 核心（不变） ────────────────────────────┐
 │  只读知识库（L0–L5）                                                  │
-│  三个调用的语义：meta / instance / eval                               │
+│  五个调用的语义：meta / instance / eval / pace / pace_eval            │
 │  包契约：数据类、行格式、eff/fx/unres、gaps/omitted、体积上限          │
 │  口径：speed / era / costBasis / basis / fail-closed 规则身份          │
 └──────────────────────────────────────────────────────────────────────┘
@@ -26,17 +26,21 @@ AgenticCIV6 的核心是一个宿主无关的知识库与查询契约；"怎么�
 
 ## 1. 核心契约
 
-### 1.1 三个调用
+### 1.1 五个调用
 
 | 调用 | 输入 | 输出 | 禁止 |
 | --- | --- | --- | --- |
 | `civi6_meta` | 无（可选 `verbose:true`） | 当前规则（`ruleset`/`locked`）、构建元信息、效果/公式覆盖率、速度档（`speedProfiles`：回合数 / 成本百分比）；`verbose` 时附实体类型清单、完整表清单、构建加载顺序 | 不作数据查询入口 |
 | `civi6_instance` | `civ` / `leader` / `speed` / `difficulty` / `section` | 一类数据：`instance`（含 `costBasis`）+ `content` + `definition` + `whenToUse` + `legend` + `gaps` / `omitted` + `manifest.classes` | 没有目标参数，不接受 `source` |
 | `civi6_eval` | `builds` / `gates` / `cities` / `popPerCity` / `eraId` / `eraIndex` / `speed` / `victory` | 供给侧 `metrics` + 需求侧 `ledger` / `cut` / `scenarios` / `path` / `deadline` + `basis` + `composition` | 不取数，只做公式组合 |
+| `civi6_pace` | `civ` / `leader?` / `speed` / `victory` / `assurance?` / `targetTurn?` / `difficulty?` / `formula?`（**只接受 instance 已解析的精确 id**） | `functionSet`（`civi6.pacing/formula/v1`：`T/base/delta/counts/actions/milestones/meta`）+ `handle`；`formula:false` 时为 `summary` + `handle` | 拒绝名字/中文名/`format`/`out`/`source`；不生成 `.mjs` 文本、不写文件 |
+| `civi6_pace_eval` | `handle`（或字面 `functionSet`）+ `calls[{fn,t?,key?,from?,to?,limit?,id?}]` | 与生成模块逐回合一致的求值（1–24 条）；`milestones` 返回 `{total,rows}` | 不做账本/砍单/情景（那是 `civi6_eval`）；超 24KB 整批报错，不截断 |
 
 - 取数只有一个入口：先 `civi6_instance(section='core')` 拿硬约束与 `manifest`，再只取问题涉及的 2~5 类。
 - `civi6_eval` 的 `speed` 必填；给 `gates` 时 `eraId` 必填（没有默认时代，它决定分母）。
-- 所有成本/回合已是实例速度口径，返回的 `costBasis` / `basis` 回显 `costMultiplier` 与 `turnScale`；`supply` 不随速度缩放。**接入层不得再次乘以速度百分比，也不得自行换算标准/联机。**
+- 需要基准时间表时：`civi6_pace`（精确 id + victory，一次）→ `civi6_pace_eval`（handle + 调用，多次）。换胜利线不必重取 instance；换文明/速度才重取。
+- `pace` 的 `T` 是函数域（我方 burst），`meta.baseline.turn` 是胜利回合（可能更晚）；`t>T` 取末值并标 `clamped`。`feasible:false` + `blockers` 是结论，不是错误。
+- 所有成本/回合已是实例速度口径，返回的 `costBasis` / `basis` / pace 的 `cost`·`slack` 回显 `costMultiplier` 与 `turnScale`；`supply` 不随速度缩放。**接入层不得再次乘以速度百分比，也不得自行换算标准/联机。**
 
 ### 1.2 包契约
 
@@ -58,9 +62,10 @@ AgenticCIV6 的核心是一个宿主无关的知识库与查询契约；"怎么�
 
 1. 一次取数（`core` → 按需 2~5 类），不在会话里反复扫类别；
 2. 算账一律走 `civi6_eval`，不做心算；
-3. 答案固定六段：约束方程 / 供给计划 / 砍单 / 情景 / 路径 / 验收；
-4. 效果只引用 `eff`/`fx`，`unres>0` 且缺 `fx` 时答"数据层未解析"；
-5. 末尾附规则与实体出处。
+3. 基准时间表一律走 `civi6_pace` → `civi6_pace_eval`，不回传 `functionSet`、不手算 `base/Δ`；
+4. 答案固定六段：约束方程 / 供给计划 / 砍单 / 情景 / 路径 / 验收；
+5. 效果只引用 `eff`/`fx`，`unres>0` 且缺 `fx` 时答"数据层未解析"；
+6. 末尾附规则与实体出处。
 
 ## 2. 接入方式 A：DeepSeek Harness 插件（已实现）
 
@@ -68,12 +73,13 @@ AgenticCIV6 的核心是一个宿主无关的知识库与查询契约；"怎么�
 
 | 文件 | 作用 |
 | --- | --- |
-| `dsh-plugin/index.js` | 插件本体：3 个工具、规则锁定、系统提示段、严格 guard、数据类包组装。零 npm 依赖 |
+| `dsh-plugin/index.js` | 插件本体：5 个工具、规则锁定、系统提示段、严格 guard、数据类包组装。零 npm 依赖 |
 | `dsh-plugin/cordis.patch.yml` | 注入配置（`ruleset` + 两个 `dbPaths`） |
 | `dsh-plugin/package.json` | `@local/civi6-kb`；`dsh.bundle.patch` 指向上面的 yml |
 | `dsh-plugin/locale/*.json`、`icon.svg` | 界面文案与图标 |
+| `dist/pacing/` | `npm run pace:build` 的编译产物（gitignored）；`civi6_pace` / `civi6_pace_eval` 懒加载 |
 
-插件导出的 `name` 为 `civi6-kb`，注入 `tools` 与 `systemPrompt` 两个服务；对外只注册 `civi6_meta` / `civi6_instance` / `civi6_eval`。
+插件导出的 `name` 为 `civi6-kb`，注入 `tools` 与 `systemPrompt` 两个服务；对外注册 `civi6_meta` / `civi6_instance` / `civi6_eval` / `civi6_pace` / `civi6_pace_eval`。
 
 ### 2.2 配置项
 
@@ -86,22 +92,25 @@ config:
   dbPaths:
     vanilla: ../data/civi6.sqlite
     bbg: ../data/civi6-bbg.sqlite
+  # pacingRoot: ..          # 仓库根（含 kb/pacing 与 dist/pacing；默认插件上一级，本地安装无需改）
 ```
 
 | 配置 | 说明 |
 | --- | --- |
 | `ruleset` | 当前会话使用的唯一规则；`vanilla` 是标准规则的内部键（含迭起兴衰/风云际会/DLC）。旧字段 `dataSource` 仍兼容 |
 | `lockRuleset` | 声明式锁定：运行期没有按调用切换规则的入口，改规则只能改配置并重载 |
-| `strictGrounding` | 拦截 `pwsh`/`bash` 直读 `data/civi6*.sqlite`，只允许 3 个工具取数（默认开） |
+| `strictGrounding` | 拦截 `pwsh`/`bash` 直读 `data/civi6*.sqlite`，只允许 `civi6_*` 工具取数（5 个，默认开） |
 | `effectCardsRequired` | 必须有可用的效果事实层，缺失或过期都 fail closed（默认开） |
 | `dbPaths` | 两套库的位置；相对路径以插件目录为基准。旧字段 `dbPath` 仍兼容 |
+| `pacingRoot` | 仓库根（含 `kb/pacing/*.json` 与 `dist/pacing/`）；默认 `workspaceRoot` 或插件上一级。相对路径以插件目录为基准 |
 
 ### 2.3 挂载与重载
 
 1. 把 `dsh-plugin/` 作为本地插件装入当前 DSH profile（本地安装，随 profile 生效）；
-2. 按需在 profile 的插件配置里覆盖 `ruleset` / `dbPaths`；
-3. 重载插件（改配置或改插件代码后都要重载，必要时重启宿主）；
-4. 新会话里调用 `civi6_meta`，确认 `ruleset.id` 与 `locked:true`。
+2. 在仓库根运行 `npm run pace:build` 生成 `dist/pacing/`（`civi6_pace` 首次调用时懒加载；缺产物会给构建提示）；
+3. 按需在 profile 的插件配置里覆盖 `ruleset` / `dbPaths` / `pacingRoot`；
+4. 重载插件（改配置或改插件代码后都要重载，必要时重启宿主；`src/pacing` 的首次构建可在插件加载后做，已加载过旧产物则需重载以绕过 ESM 缓存）；
+5. 新会话里调用 `civi6_meta`，确认 `ruleset.id` 与 `locked:true`。
 
 ### 2.4 环境变量覆盖
 
@@ -123,7 +132,7 @@ config:
 
 已确定的边界：
 
-- **复用核心，不重写逻辑**：同一个只读库、同一套三个调用语义、同一份包契约；Mod 侧只负责 I/O 与渲染。
+- **复用核心，不重写逻辑**：同一个只读库、同一套五个调用语义、同一份包契约；Mod 侧只负责 I/O 与渲染。
 - **KB 只读**：Mod 不写入知识库；数据更新由构建/摄取管线完成。
 - **规则版本随游戏**：Mod 场景下规则身份与游戏版本必须绑定，仍按 fail-closed 校验。
 - **数据来源切换**：实时数据接入的适配器边界见 [架构方案 §10](ARCHITECTURE.md)。
@@ -140,7 +149,7 @@ config:
 | `renderToolPayload(kind, value)` | 把查询结果渲染成模型可读的载荷 |
 | `apply(ctx, config)` | DSH 宿主适配器（`ctx` 实现 `tools` / `systemPrompt` 即可） |
 
-`npm run verify:plugin` 本身就通过直接 import `dsh-plugin/index.js` 完成断言，可作为最小接入示例。要做 MCP / CLI / HTTP 接入，只需实现对应的 I/O 适配与规则锁定，不需要复制查询逻辑。
+`npm run verify:plugin` 本身就通过直接 import `dsh-plugin/index.js` 完成断言，可作为最小接入示例。基准节奏的宿主无关入口在 `src/pacing/api.ts`（`buildPaceFunctionSet`）、`evaluate.ts`（`evaluatePacingFormula`）与 `handle.ts`（`encode/decodePaceHandle`），由 `npm run pace:build` 编译到 `dist/pacing`。要做 MCP / CLI / HTTP 接入，只需实现对应的 I/O 适配与规则锁定，不需要复制查询逻辑。
 
 ## 5. 切换规则
 
@@ -161,8 +170,9 @@ config:
 ## 7. 换接入层检查清单
 
 - [ ] 只读打开知识库，规则身份与构建指纹校验失败即拒绝服务
-- [ ] 只暴露 `meta` / `instance` / `eval` 三个调用，无 SQL、无单实体放大镜、无 `source` 参数
+- [ ] 只暴露 `meta` / `instance` / `eval` / `pace` / `pace_eval` 五个调用，无 SQL、无单实体放大镜、无 `source` 参数
 - [ ] `instance` 按类交付，单类超限报错而不是截断
+- [ ] `pace` 只接受精确 id，返回 `functionSet + handle`；`pace_eval` 按调用求值，超限报错不截断
 - [ ] 成本与回合原样透出 `costBasis` / `basis`，不二次换算
 - [ ] `gaps` / `omitted` 原样透出，缺失项回答"数据层未收录"
 - [ ] 系统提示/工具描述携带同一套回答协议（一次取数、公式算账、六段式、出处）

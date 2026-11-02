@@ -3,6 +3,7 @@ import { existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { apply, createKnowledgeBase, renderToolPayload } from "../dsh-plugin/index.js";
+import { buildPacing, encodePaceHandle, makePacingFunctions, PACE_CALL_FNS } from "../dist/pacing/index.js";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const dbFile = process.env.CIVI6_BBG_DB_PATH?.trim() || join(root, "data", "civi6-bbg.sqlite");
@@ -569,7 +570,7 @@ try {
   assert.ok(schema.tables.some((t) => t.name === "UnitPromotions"), JSON.stringify(schema.tables.map((t) => t.name)));
   console.log(`✓ kb.schema（内部 QA）：UnitPromotion* ${schema.tables.length} 张表`);
 
-  // --- host surface: three tools, no drill-down escape hatch ---------------
+  // --- host surface: five tools, no drill-down escape hatch ----------------
   const registered = {};
   apply(
     {
@@ -584,7 +585,7 @@ try {
     },
     { ruleset: "bbg", dbPaths: { bbg: dbFile }, effectCardsRequired: true, strictGrounding: false },
   );
-  const expectedTools = ["civi6_instance", "civi6_eval", "civi6_meta"];
+  const expectedTools = ["civi6_instance", "civi6_eval", "civi6_meta", "civi6_pace", "civi6_pace_eval"];
   for (const name of expectedTools) {
     assert.ok(registered[name], `缺少工具 ${name}: ${JSON.stringify(Object.keys(registered))}`);
   }
@@ -599,7 +600,7 @@ try {
   ]) {
     assert.equal(registered[gone], undefined, `${gone} 仍注册（探索面应为 0）`);
   }
-  assert.deepEqual(Object.keys(registered).sort(), [...expectedTools].sort(), "模型面工具数不是 3");
+  assert.deepEqual(Object.keys(registered).sort(), [...expectedTools].sort(), "模型面工具数不是 5");
 
   const hostCore = await registered.civi6_instance.execute({
     civ: "Russia",
@@ -636,6 +637,177 @@ try {
   assert.deepEqual(evalParams.required, ["builds", "speed"], `eval required=${JSON.stringify(evalParams.required)}`);
   assert.ok(evalParams.properties.speed, "eval 缺 speed 参数");
   assert.match(evalParams.properties.eraId.description, /REQUIRED/, "eraId 说明未标注必填于 gates");
+
+  // --- pacing: build the function set once, evaluate by explicit calls ------
+  const paceParams = registered.civi6_pace.parameters;
+  assert.deepEqual(paceParams.required, ["civ", "speed", "victory"], `pace required=${JSON.stringify(paceParams.required)}`);
+  assert.equal(paceParams.properties.source, undefined, "pace 不应暴露 source（规则锁定）");
+  assert.equal(paceParams.properties.format, undefined, "pace 不应暴露 format（面向数据）");
+  assert.ok(paceParams.properties.formula, "pace 缺 formula 开关");
+  assert.deepEqual(
+    registered.civi6_pace_eval.parameters.properties.calls.items.properties.fn.enum,
+    [...PACE_CALL_FNS],
+    "pace_eval 的 fn enum 与求值器不一致",
+  );
+
+  const pace = await registered.civi6_pace.execute({
+    civ: "CIVILIZATION_KOREA",
+    leader: "LEADER_SEONDEOK",
+    speed: "online",
+    victory: "science",
+  });
+  assert.equal(pace.schema, "civi6.pacing/tool/v1", "pace schema");
+  assert.equal(pace.functionSet?.schema, "civi6.pacing/formula/v1", "pace functionSet schema");
+  assert.ok(pace.functionSet.T > 0, `pace T=${pace.functionSet?.T}`);
+  assert.ok(pace.handle?.startsWith("pc1."), "pace handle 缺失");
+  assert.equal(pace.functionSet.meta.checks.closedLoop, true, "pace 证书 closedLoop 非 true");
+  assert.equal(pace.functionSet.meta.baseline.feasible, true, "pace science 应可行");
+  const paceText = renderToolPayload("pace", pace);
+  assert.ok(paceText.length <= 32000, `pace 载荷 ${paceText.length} > 32000`);
+
+  // The input contract is data, not user text: names and ambiguous leaders fail.
+  await assert.rejects(
+    () => registered.civi6_pace.execute({ civ: "Korea", speed: "online", victory: "science" }),
+    /精确 id/,
+    "名字入参没有被拒绝",
+  );
+  await assert.rejects(
+    () => registered.civi6_pace.execute({ civ: "CIVILIZATION_AMERICA", speed: "online", victory: "science" }),
+    /多个领袖/,
+    "多领袖文明未指定 leader 时没有报错",
+  );
+
+  const adapter = {
+    hasTable: (table) =>
+      !!kb.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name=?").get(table),
+    tableColumns: (table) => kb.db.prepare(`PRAGMA table_info("${table}")`).all().map((row) => row.name),
+    all: (sql, ...params) => kb.db.prepare(sql).all(...params),
+    get: (sql, ...params) => kb.db.prepare(sql).get(...params),
+  };
+  const expectedResult = buildPacing(adapter, {
+    source: "bbg",
+    civId: "CIVILIZATION_KOREA",
+    leaderId: "LEADER_SEONDEOK",
+    victoryId: "science",
+    speed: "online",
+    root,
+  });
+  const expectedFns = makePacingFunctions(expectedResult);
+
+  const paceEval = await registered.civi6_pace_eval.execute({
+    handle: pace.handle,
+    calls: [
+      { fn: "cumulative", key: "science", t: 120 },
+      { fn: "state", t: 120 },
+      { fn: "nextMilestone", t: 120 },
+      { fn: "milestones", from: 1, to: 120, limit: 3 },
+      { fn: "baseline" },
+    ],
+  });
+  assert.equal(paceEval.schema, "civi6.pacing/eval/v1", "pace_eval schema");
+  assert.equal(paceEval.T, pace.functionSet.T, "pace_eval T 与函数集不一致");
+  assert.equal(paceEval.source, "handle", "pace_eval source 不是 handle");
+  const scienceAt120 = paceEval.results.find((r) => r.fn === "cumulative" && r.key === "science").value;
+  const stateAt120 = paceEval.results.find((r) => r.fn === "state").value;
+  assert.ok(
+    Math.abs(scienceAt120 - expectedFns.science(120)) <= 1e-6,
+    `pace_eval science(120)=${scienceAt120} vs ${expectedFns.science(120)}`,
+  );
+  assert.ok(
+    Math.abs(stateAt120.cumulative.production - expectedFns.production(120)) <= 1e-6,
+    `pace_eval production(120)=${stateAt120.cumulative.production} vs ${expectedFns.production(120)}`,
+  );
+  assert.equal(stateAt120.research?.id, expectedFns.research(120)?.id, "pace_eval research 不一致");
+  const milestonePage = paceEval.results.find((r) => r.fn === "milestones").value;
+  assert.ok(milestonePage.total > 0 && milestonePage.rows.length === 3, "pace_eval milestones 窗口/limit 不对");
+  assert.equal(
+    paceEval.results.find((r) => r.fn === "baseline").value.turn,
+    expectedResult.baseline.turn,
+    "pace_eval baseline.turn 不一致",
+  );
+
+  // The literal function set is accepted too (external/offline producers), but
+  // the handle remains the cheap path.
+  const literalEval = await registered.civi6_pace_eval.execute({
+    functionSet: pace.functionSet,
+    calls: [{ fn: "cumulative", key: "science", t: 120 }],
+  });
+  assert.equal(literalEval.source, "functionSet", "字面 functionSet 未被识别");
+  assert.equal(literalEval.results[0].value, scienceAt120, "字面 functionSet 求值不一致");
+
+  // Handoffs fail closed when stale/corrupt, and batches stay bounded.
+  const drift = encodePaceHandle({
+    version: 1,
+    source: "bbg",
+    civ: "CIVILIZATION_KOREA",
+    leader: "LEADER_SEONDEOK",
+    speed: "online",
+    victory: "science",
+    assurance: "standard",
+    targetTurn: null,
+    rawBuiltAt: "stale",
+    kbBuiltAt: "stale",
+  });
+  await assert.rejects(
+    () => registered.civi6_pace_eval.execute({ handle: drift, calls: [{ fn: "baseline" }] }),
+    /不一致/,
+    "旧构建 handle 没有被拒绝",
+  );
+  await assert.rejects(
+    () => registered.civi6_pace_eval.execute({ handle: "pc1.bad", calls: [{ fn: "baseline" }] }),
+    /handle/,
+    "损坏 handle 没有被拒绝",
+  );
+  await assert.rejects(
+    () =>
+      registered.civi6_pace_eval.execute({
+        handle: pace.handle,
+        calls: Array.from({ length: 25 }, () => ({ fn: "baseline" })),
+      }),
+    /最多 24/,
+    "calls 上限没有生效",
+  );
+
+  // Culture is infeasible under the authored baseline: a result, not an error.
+  const culturePace = await registered.civi6_pace.execute({
+    civ: "CIVILIZATION_KOREA",
+    leader: "LEADER_SEONDEOK",
+    speed: "online",
+    victory: "culture",
+    formula: false,
+  });
+  assert.equal(culturePace.summary?.baseline?.feasible, false, "culture 应显式不可行");
+  assert.ok(culturePace.summary?.baseline?.blockers?.length > 0, "culture 缺少 blockers");
+
+  // Difficulty is a provenance caveat, not a silent re-model.
+  const settlerPace = await registered.civi6_pace.execute({
+    civ: "CIVILIZATION_KOREA",
+    leader: "LEADER_SEONDEOK",
+    speed: "online",
+    victory: "science",
+    difficulty: "DIFFICULTY_SETTLER",
+    formula: false,
+  });
+  assert.equal(settlerPace.warnings?.[0]?.code, "difficulty-modeled", "难度不一致没有 warning");
+
+  // An infeasible target is a structured blocker, never a re-planned baseline.
+  const targetPace = await registered.civi6_pace.execute({
+    civ: "CIVILIZATION_KOREA",
+    leader: "LEADER_SEONDEOK",
+    speed: "online",
+    victory: "science",
+    targetTurn: 20,
+    formula: false,
+  });
+  assert.equal(targetPace.summary?.baseline?.feasible, false, "T20 science 应不可行");
+  assert.ok(
+    targetPace.summary?.baseline?.blockers?.some((b) => b.kind === "target"),
+    "不可行目标缺少 target blocker",
+  );
+  console.log(
+    `✓ pace：T=${pace.functionSet.T} / 载荷 ${paceText.length}B / eval science(120)=${scienceAt120} / ` +
+      `milestones ${milestonePage.total} 条（回 ${milestonePage.rows.length}） / culture infeasible`,
+  );
 
   // A packet row can still be resolved by its handle for QA, but the model has
   // no tool that accepts one; the handle index and the resolver must agree on pk

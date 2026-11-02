@@ -24,7 +24,7 @@ L3   决策切片      kb_plan / kb_target / kb_budget / kb_check / kb_derivatio
 L3b  派生节奏      src/pacing（查询期现算，不落表）
 L4   文明          kb_civ_profile / kb_civ_entity_map / kb_civ_delta / kb_civ_capability
 L5   检索          kb_card / v_kb_* 视图 / search_docs（BM25 倒排索引）
-工具面             civi6_meta / civi6_instance / civi6_eval（模型唯一入口）
+工具面             civi6_meta / civi6_instance / civi6_eval / civi6_pace / civi6_pace_eval（模型唯一入口）
 ```
 
 | 层 | 产物 | 回答什么问题 |
@@ -37,14 +37,14 @@ L5   检索          kb_card / v_kb_* 视图 / search_docs（BM25 倒排索引�
 | L3b | 基准节奏（现算） | 任意速度 × 文明 × 胜利线，每个 T 之前必须完成什么 |
 | L4 | 文明修正 | 这个文明的套件改变了哪些约束 |
 | L5 | 文档与倒排索引 | 从哪里开始找 |
-| 工具面 | 按类切好的数据包 + 算账结果 | 模型这一轮该拿什么、该算什么 |
+| 工具面 | 按类切好的数据包 + 算账结果 + 基准函数集/求值 | 模型这一轮该拿什么、该算什么 |
 
 ### 2.1 仓库地图
 
 ```
 dsh-plugin/            插件接入层（运行时，零 npm 依赖，直接用 node:sqlite 读库）
-  index.js             3 个工具 + 单规则锁定 + 系统提示 + 严格 guard + 数据类包组装
-  cordis.patch.yml     注入配置（ruleset + 两个 dbPaths）
+  index.js             5 个工具 + 单规则锁定 + 系统提示 + 严格 guard + 数据类包组装
+  cordis.patch.yml     注入配置（ruleset + 两个 dbPaths + pacingRoot）
   package.json / locale/ / icon.svg
 src/                   构建管线（把游戏/BBG 数据摄取成 SQLite）
   cli.ts / build.ts    命令入口与构建编排
@@ -64,6 +64,7 @@ scripts/               ts-loader、verify-*（sources/effects/spec-parity/plugin
 kb/                    策划 JSON（dimensions/victories/eras/speeds/plans/civs + pacing/baseline + pacing/*）+ 决策层设计文档
 model/                 数值思路材料（非权威，不参与构建）
 docs/                  快速开始 / 架构方案 / 接入方式
+dist/pacing/           src/pacing 的 tsc 编译产物（gitignore；civi6_pace 懒加载）
 data/                  构建产物：标准库、BBG 库、BBG 源码缓存（gitignore）
 ```
 
@@ -157,11 +158,12 @@ scope + dimension + op + value (+ per + condition)
 - 作者数据只有 1 个口径（`baseline.json`：地块/区域保底、来源白名单、迭代轮数）+ 5 个胜利目标（终局谓词、瓶颈币种、参照回合）；
 - 路径、成本、产出、回合数在查询期由 `kb_node` / `kb_unlock` / `kb_formula` / `kb_civ_*` / `kb_speed_profile` / `kb_era_window` 现算，**不落 `kb_*` 表**；
 - 输出默认是**可 `import` 的零依赖 ESM 公式模块**（base + 速率差分，按调用计算；科学/标准约 28KB；JSON 仍是 `--format=json` 的精确契约），证书逐回合复核成本覆盖、同城前置、来源合法与单调性；
+- 同一套引擎也以**数据化工具**交付：`civi6_pace` 返回 `civi6.pacing/formula/v1` 函数集 + `handle`，`civi6_pace_eval` 按 `{fn,t,...}` 求值；agent 不再需要 import 模块或心算分段函数（见 [PACING §2.2](PACING.md)）；
 - 它不替代 `kb_plan`：后者是经验参照，前者的 `referenceTurn` 只用于对照。详细公式与实测见 [基准节奏](PACING.md)。
 
 ## 7. 数据面契约
 
-模型面只有 3 个工具（见 [接入方式](INTEGRATION.md)），其中取数只有 `civi6_instance` 一个入口，它是 **objective-free** 的：只由硬约束（文明/领袖/速度/难度）决定，一次调用返回**一类数据**。
+模型面有 5 个工具（见 [接入方式](INTEGRATION.md)），其中取数只有 `civi6_instance` 一个入口，它是 **objective-free** 的：只由硬约束（文明/领袖/速度/难度）决定，一次调用返回**一类数据**。
 
 - 先取 `core`（硬约束 + 文明套件全文 + 城邦 + 中性索引 + 全局参数子集 + `gaps`/`omitted` + `manifest.classes`），再按 `manifest[].whenToUse` 只取问题涉及的 2~5 类。
 - 11 个数据类（含 `core`）：`core` / `tech-tree` / `civic-tree` / `units` / `districts` / `buildings` / `tiles` / `multipliers` / `beliefs` / `promotions` / `governors`。
@@ -171,6 +173,7 @@ scope + dimension + op + value (+ per + condition)
 - **体积硬约束**：任一类超过 44,000 字符直接报错，不交给传输层截断。
 - 行内 `cost` 已是本实例速度口径（`instance.costBasis` 回显倍数与来源），换速度需重取；`civi6_eval` 的 `required` / `cut.cost` / `deadline` 同样按速度折算并回显 `basis`，`supply` 不随速度缩放。
 - `gaps` / `omitted` 是硬契约：`omitted` 列数据层确实没有的量（时代得分/黄金时代、伟人个体、自然奇观本体、巨作清单、未进 `cityStates` 的城邦加成），`gaps` 列包内故意没带的字段（购买价、政策槽数量、OR 型前置、每行 `fx` 第 4 条以后、原始修饰符链、单位通用能力清单、光环是否叠加）。写在清单里的一律回答"数据层未收录"。
+- 基准时间表不在 `instance` 里：`civi6_pace`（精确 id + victory）一次构建函数集与 `handle`，`civi6_pace_eval`（handle + `calls`）按回合求值；两者共用同一份 `kb/pacing` 口径与证书。
 
 ## 8. 实测附录：为什么是这个形状
 
@@ -197,7 +200,7 @@ scope + dimension + op + value (+ per + condition)
 ## 9. 只读与安全
 
 - 游戏数据目录仅以只读方式读取；唯一写入目标是工作区的 `data/`（标准库、BBG 库、BBG 源码缓存），不触碰游戏文件。
-- 插件的数据库连接是只读的；模型面没有 SQL 工具、没有单实体放大镜，取数只经由 3 个工具。
+- 插件的数据库连接是只读的；模型面没有 SQL 工具、没有单实体放大镜，取数只经由 5 个 `civi6_*` 工具。
 - 严格模式下插件会拒绝 `pwsh`/`bash` 直接读取 `data/civi6*.sqlite`；维护命令不受影响。
 - BBG 源码为 MIT 许可，仅下载到本地缓存，不随仓库分发。
 

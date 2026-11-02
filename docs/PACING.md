@@ -96,6 +96,50 @@ pace.formula;                    // 最小公式基 { base, delta, counts, ids, 
 - `checks`：证书七项。
 - `assumptions` / `provenance`：口径、未建模修饰符计数、构建指纹。
 
+### 2.2 工具形态：`civi6_pace` / `civi6_pace_eval`
+
+CLI 产物面向人（可 import 的 `.mjs`、`--format`、`--out`）；agent 需要的是**可按回合反复查询的数据**。因此 DSH 插件把同一套引擎拆成两个工具：
+
+| 工具 | 输入 | 输出 | 说明 |
+| --- | --- | --- | --- |
+| `civi6_pace` | `civ`（`CIVILIZATION_*`）、`leader?`（`LEADER_*`）、`speed`、`victory`、`assurance?`、`targetTurn?`、`difficulty?`、`formula?` | `functionSet`（`civi6.pacing/formula/v1`）+ `handle` | **只接受 instance 已解析的精确 id**，拒绝名字/中文名/`format`/`out`/`source`；`formula:false` 只回 `summary`（= `formula.meta`）+ handle。 |
+| `civi6_pace_eval` | `handle`（或字面 `functionSet`）+ `calls[{fn,t?,key?,from?,to?,limit?,id?}]` | 与生成模块逐回合一致的求值结果 | 1–24 条调用；`milestones` 是窗口 + `limit`，返回 `{total,rows}`；超 24KB 整批报错，不截断。 |
+
+```js
+// 1) 构建一次（精确 id 来自 civi6_instance → core）
+const pace = await tools.civi6_pace({
+  civ: "CIVILIZATION_KOREA", leader: "LEADER_SEONDEOK", speed: "online", victory: "science",
+});
+// pace.functionSet.T / base / delta / counts / ids / labels / actions / milestones / meta
+// pace.handle                               → 交给执行器的紧凑引用
+
+// 2) 按调用求值（不要回传 20KB functionSet）
+await tools.civi6_pace_eval({
+  handle: pace.handle,
+  calls: [
+    { fn: "state", t: 120 },
+    { fn: "cumulative", key: "science", t: 120 },
+    { fn: "nextMilestone", t: 120 },
+    { fn: "milestones", from: 100, to: 140, limit: 20 },
+    { fn: "baseline" },
+  ],
+});
+```
+
+`fn`：`cumulative / rate / state / cities / population / research / civic / builds / actionsAt / milestones / nextMilestone / milestone / baseline / checks / assumptions / basis / input`。
+
+- **`T` 是函数域**（`series` 末回合 = `selfTurn`/`burstTurn`），不是胜利回合；`meta.baseline.turn` 可能更晚（科学线加飞行回合）。例：BBG 罗马标准科学 `T=364`、`baseline.turn=414`。
+- **边界**：`t` 向下取整；`t<1` → 0/空；`t>T` → 末值并标 `clamped:true`；非数字 → 报错。`milestones` 的 `deps` 恒为 `[]`（函数集不携带依赖图）。
+- **handle**：`pc1.<base64url>`，编码构建输入 + `_meta.build`/`kb.build` 指纹；执行器先校验再求值，知识库重建后旧 handle 会被拒绝。
+- **构建前置**：`src/pacing` 需编译到 `dist/pacing`：
+
+  ```bash
+  npm run pace:build   # tsc -p tsconfig.pacing.json
+  ```
+
+  插件懒加载该目录；缺 `dist` 时 `civi6_pace` 直接报错并提示构建命令，不影响插件启动。
+- **与 CLI 的关系**：CLI 仍是导出/人读入口；工具不返回 `.mjs` 文本，也不写文件。工具的函数集与生成模块在 `0..T+10` 全回合一致（`npm run pace:verify` 断言）。
+
 ## 3. 两个核心机制
 
 **M1 反向截止时间（从终局到关键节点）**
@@ -163,7 +207,7 @@ slack=0 的节点构成关键链；`--target-turn` 下 slack 为负即目标不�
 7. **I7 速度关系**：online burst < standard burst，且不低于一半；成本倍率 0.5。
 8. **I8 松弛自洽**：`slack = latestTurn − turn`；负值不静默。
 9. 另含：`--target-turn` 不可行必须显式拒绝；`strict` 不得优于 `standard`。
-10. **公式 = IR 事实**：生成的模块可 `import`、API 齐全、与库内求值器在 **0..T+10 每个整数回合**一致（累计/速率误差 ≤1e-6）、零 `import`/`require`、无内嵌 `series`/`DATA`、体积 ≤40KB、同输入两次生成逐字节一致。
+10. **公式 = IR 事实**：生成的模块可 `import`、API 齐全、与库内求值器在 **0..T+10 每个整数回合**一致（累计/速率误差 ≤1e-6）、零 `import`/`require`、无内嵌 `series`/`DATA`、体积 ≤40KB、同输入两次生成逐字节一致。工具侧 `evaluatePacingFormula` 与生成模块同语义，`npm run pace:verify` 对二者同样做全回合对拍。
 
 ## 8. 边界与已知缺口
 

@@ -1,9 +1,9 @@
 {
   "name": "@local/civi6-kb",
-  "version": "3.1.0",
+  "version": "3.2.0",
   "private": true,
   "type": "module",
-  "description": "Ruleset-locked Civilization VI knowledge-base tools: objective-free data classes with inline authoritative text, deterministic formula ledger, and ruleset provenance.",
+  "description": "Ruleset-locked Civilization VI knowledge-base tools: objective-free data classes with inline authoritative text, deterministic formula ledger, baseline pacing function set + evaluator, and ruleset provenance.",
   "exports": {
     ".": "./index.js",
     "./package.json": "./package.json",

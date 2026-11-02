@@ -65,6 +65,14 @@ npm run build:all
 
 `npm run rebuild:bbg` 用于强制重建 BBG 库（例如更新了本地 `CIV6_BBG_DIR` 之后）。
 
+基准节奏工具需要额外编译一次引擎（`dist/pacing/`，已 gitignore）：
+
+```bash
+npm run pace:build
+```
+
+插件运行期通过 `civi6_pace` / `civi6_pace_eval` 懒加载该目录；缺产物时工具会直接报错并提示这条命令，不影响插件启动。首次调用前构建即可；若本次会话已经成功调用过旧产物，改 `src/pacing` 后重跑 `pace:build` 还需重载插件（ESM 模块已缓存）。
+
 ## 4. 增量重建
 
 以下命令不需要游戏安装数据，通常秒级：
@@ -84,7 +92,23 @@ npm run kb:verify       # 决策层断言与查询基准
 npm run typecheck       # TypeScript 类型检查（需要 devDependencies）
 ```
 
-`verify:effects` 会依次执行 `verify-effects`、`verify:spec-parity`、`verify:plugin`。其中 `verify:plugin` 会打印各数据类的实测体积，是改插件后最先跑的一条。
+`verify:effects` 会依次执行 `verify-effects`、`verify:spec-parity`、`verify:plugin`（后者会先跑 `pace:build`）。其中 `verify:plugin` 会打印各数据类的实测体积与 pace 函数集载荷，是改插件后最先跑的一条。
+
+基准节奏单独验证（与生成模块全回合对拍、handle/request 校验）：
+
+```bash
+npm run pace:verify
+CIVI6_SOURCE=bbg npm run pace:verify   # 用 BBG 库再跑一遍
+```
+
+最小工具链路（插件已加载时）：
+
+```js
+const pace = await tools.civi6_pace({
+  civ: "CIVILIZATION_KOREA", leader: "LEADER_SEONDEOK", speed: "online", victory: "science",
+});
+await tools.civi6_pace_eval({ handle: pace.handle, calls: [{ fn: "state", t: 120 }] });
+```
 
 轨迹体检（读取本机 DSH 会话日志）：
 

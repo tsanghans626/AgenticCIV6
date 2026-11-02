@@ -53,3 +53,9 @@ export type {
   PacingStateKey,
 } from "./functions.js";
 export { verifyPacing } from "./verify.js";
+export { buildPaceFunctionSet } from "./api.js";
+export type { PaceBuildRequest } from "./api.js";
+export { PACE_CALL_FNS, evaluatePacingFormula, validatePaceCall, validatePaceFormula } from "./evaluate.js";
+export type { PaceCallFn, PaceCallInput, PaceCallResult } from "./evaluate.js";
+export { PACE_HANDLE_PREFIX, decodePaceHandle, encodePaceHandle } from "./handle.js";
+export type { PaceHandleData } from "./handle.js";

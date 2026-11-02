@@ -4,8 +4,12 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { KnowledgeDb } from "../src/db.ts";
+import { buildPaceFunctionSet } from "../src/pacing/api.ts";
 import { buildPacing } from "../src/pacing/engine.ts";
+import { evaluatePacingFormula, validatePaceFormula } from "../src/pacing/evaluate.ts";
+import { buildPacingFormula } from "../src/pacing/formula.ts";
 import { makePacingFunctions } from "../src/pacing/functions.ts";
+import { decodePaceHandle, encodePaceHandle } from "../src/pacing/handle.ts";
 import { renderPacingModule } from "../src/pacing/module.ts";
 import { verifyPacing } from "../src/pacing/verify.ts";
 
@@ -289,6 +293,218 @@ try {
     }
   } finally {
     rmSync(moduleDir, { recursive: true, force: true });
+  }
+
+  // ---- data-oriented function-set API + evaluator ----------------------
+  //
+  // `buildPaceFunctionSet` is the tool-facing contract: exact ids in, formula
+  // out. `evaluatePacingFormula` is the executor surface. Both must agree with
+  // the generated module turn by turn, and the request must fail closed on
+  // names, ambiguous leaders and city-states.
+  const sample = results.get(`online:${civs[0]}:science`) ?? results.get(`standard:${civs[0]}:science`);
+  if (!sample) {
+    check("pace 函数集样本存在", () => {
+      throw new Error("缺少 science 结果，无法验证函数集 API");
+    });
+  } else {
+    const sampleCiv = sample.civ.civId;
+    const sampleLeader = sample.civ.leaderId;
+    const sampleSpeed = sample.input.speed;
+    let functionSet = null;
+    check("buildPaceFunctionSet 与 buildPacingFormula 一致", () => {
+      functionSet = buildPaceFunctionSet(kb, {
+        source,
+        civ: sampleCiv,
+        leader: sampleLeader,
+        speed: sampleSpeed,
+        victory: "science",
+        root,
+      });
+      assert.deepEqual(functionSet, buildPacingFormula(sample));
+      assert.ok(JSON.stringify(functionSet).length <= 32000, `函数集 ${JSON.stringify(functionSet).length}B 超预算`);
+    });
+
+    check("名字/非法 id/非法 targetTurn fail closed", () => {
+      assert.throws(
+        () =>
+          buildPaceFunctionSet(kb, {
+            source,
+            civ: "Korea",
+            speed: sampleSpeed,
+            victory: "science",
+            root,
+          }),
+        /精确 id/,
+      );
+      assert.throws(
+        () =>
+          buildPaceFunctionSet(kb, {
+            source,
+            civ: sampleCiv,
+            leader: "LEADER_SEONDEOK_FAKE",
+            speed: sampleSpeed,
+            victory: "science",
+            root,
+          }),
+        /不属于/,
+      );
+      assert.throws(
+        () =>
+          buildPaceFunctionSet(kb, {
+            source,
+            civ: sampleCiv,
+            leader: sampleLeader,
+            speed: sampleSpeed,
+            victory: "science",
+            targetTurn: 0,
+            root,
+          }),
+        /正整数/,
+      );
+    });
+
+    check("多领袖文明必须显式传 leader", () => {
+      const row = kb.get(
+        `SELECT civ_id, COUNT(*) AS n FROM kb_civ_profile
+          WHERE source = ? AND leader_id NOT LIKE 'LEADER_MINOR_CIV_%'
+          GROUP BY civ_id HAVING n > 1 ORDER BY civ_id LIMIT 1;`,
+        source,
+      );
+      assert.ok(row, "缺少多领袖文明样本");
+      assert.throws(
+        () =>
+          buildPaceFunctionSet(kb, {
+            source,
+            civ: String(row.civ_id),
+            speed: sampleSpeed,
+            victory: "science",
+            root,
+          }),
+        /多个领袖/,
+      );
+    });
+
+    check("城邦/小文明不能作为基准主体", () => {
+      const row = kb.get(
+        `SELECT civ_id FROM kb_civ_profile WHERE source = ? AND leader_id LIKE 'LEADER_MINOR_CIV_%' ORDER BY civ_id LIMIT 1;`,
+        source,
+      );
+      assert.ok(row, "缺少城邦样本");
+      assert.throws(
+        () =>
+          buildPaceFunctionSet(kb, {
+            source,
+            civ: String(row.civ_id),
+            speed: sampleSpeed,
+            victory: "science",
+            root,
+          }),
+        /城邦/,
+      );
+    });
+
+    check("handle round-trip + 损坏拒绝", () => {
+      const handle = encodePaceHandle({
+        version: 1,
+        source,
+        civ: sampleCiv,
+        leader: sampleLeader,
+        speed: sampleSpeed,
+        victory: "science",
+        assurance: "standard",
+        targetTurn: null,
+        rawBuiltAt: "raw",
+        kbBuiltAt: "kb",
+      });
+      assert.deepEqual(decodePaceHandle(handle), {
+        version: 1,
+        source,
+        civ: sampleCiv,
+        leader: sampleLeader,
+        speed: sampleSpeed,
+        victory: "science",
+        assurance: "standard",
+        targetTurn: null,
+        rawBuiltAt: "raw",
+        kbBuiltAt: "kb",
+      });
+      assert.throws(() => decodePaceHandle("pc1.bad"), /handle/);
+      assert.throws(() => decodePaceHandle("nope"), /handle/);
+    });
+
+    check("functionSet 形状校验", () => {
+      if (!functionSet) throw new Error("函数集未构建");
+      validatePaceFormula(functionSet);
+      assert.throws(() => validatePaceFormula({ ...functionSet, schema: "x" }), /schema/);
+      assert.throws(() => validatePaceFormula(null), /对象/);
+    });
+
+    const evalDir = mkdtempSync(join(tmpdir(), "civi6-pace-eval-"));
+    try {
+      const file = join(evalDir, "fn.mjs");
+      writeFileSync(file, renderPacingModule(sample), "utf8");
+      let mod = null;
+      let importError = null;
+      try {
+        mod = await import(pathToFileURL(file).href);
+      } catch (error) {
+        importError = error;
+      }
+      check("pace 函数集模块可导入", () => {
+        if (importError) throw importError;
+        assert.ok(mod?.default, "缺 default export");
+      });
+      if (mod && functionSet) {
+        check("evaluator 全回合 parity（0..T+10）", () => {
+          const T = functionSet.T;
+          const dims = ["science", "culture", "gold", "production", "food", "faith", "tourism"];
+          for (let t = 0; t <= T + 10; t++) {
+            for (const dim of dims) {
+              const cum = evaluatePacingFormula(functionSet, { fn: "cumulative", key: dim, t }).value;
+              const rate = evaluatePacingFormula(functionSet, { fn: "rate", key: dim, t }).value;
+              assert.ok(Math.abs(cum - mod.default[dim](t)) <= 1e-6, `cum ${dim}@${t}: ${cum} vs ${mod.default[dim](t)}`);
+              assert.ok(
+                Math.abs(rate - mod.default.rate(t)[dim]) <= 1e-6,
+                `rate ${dim}@${t}: ${rate} vs ${mod.default.rate(t)[dim]}`,
+              );
+            }
+            assert.equal(evaluatePacingFormula(functionSet, { fn: "cities", t }).value, mod.default.cities(t));
+            assert.equal(evaluatePacingFormula(functionSet, { fn: "population", t }).value, mod.default.population(t));
+          }
+        });
+        check("evaluator state/动作/里程碑 parity", () => {
+          const T = functionSet.T;
+          for (const t of [0, 1, Math.max(1, Math.floor(T / 2)), T, T + 10]) {
+            assert.deepEqual(evaluatePacingFormula(functionSet, { fn: "state", t }).value, mod.default.state(t));
+            assert.equal(
+              evaluatePacingFormula(functionSet, { fn: "research", t }).value?.id ?? null,
+              mod.default.research(t)?.id ?? null,
+            );
+            assert.equal(
+              evaluatePacingFormula(functionSet, { fn: "civic", t }).value?.id ?? null,
+              mod.default.civic(t)?.id ?? null,
+            );
+          }
+          const page = evaluatePacingFormula(functionSet, { fn: "milestones", from: 1, to: T, limit: 100 }).value;
+          assert.equal(page.total, mod.default.milestonesUntil(T).length, "里程碑总数不一致");
+          const first = page.rows[0];
+          const expected = mod.default.milestonesUntil(T)[0];
+          if (expected) assert.deepEqual(first, expected);
+        });
+        check("evaluator 边界与调用校验", () => {
+          assert.equal(evaluatePacingFormula(functionSet, { fn: "cumulative", key: "science", t: 0 }).value, 0);
+          const beyond = evaluatePacingFormula(functionSet, { fn: "cumulative", key: "science", t: functionSet.T + 10 });
+          assert.equal(beyond.clamped, true, "t>T 应标 clamped");
+          assert.throws(() => evaluatePacingFormula(functionSet, { fn: "state" }), /t/);
+          assert.throws(() => evaluatePacingFormula(functionSet, { fn: "nope" }), /未知 fn/);
+          assert.throws(() => evaluatePacingFormula(functionSet, { fn: "milestones", limit: 0 }), /limit/);
+          assert.throws(() => evaluatePacingFormula(functionSet, { fn: "baseline", t: 1 }), /不接受 t/);
+          assert.throws(() => evaluatePacingFormula(functionSet, { fn: "milestone", id: "" }), /id/);
+        });
+      }
+    } finally {
+      rmSync(evalDir, { recursive: true, force: true });
+    }
   }
 } finally {
   kb.close();

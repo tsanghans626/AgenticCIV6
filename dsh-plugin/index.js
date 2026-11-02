@@ -1,7 +1,7 @@
 import { DatabaseSync } from "node:sqlite";
 import { existsSync, statSync } from "node:fs";
 import { dirname, isAbsolute, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 export const name = "civi6-kb";
 export const inject = ["tools", "systemPrompt"];
@@ -55,6 +55,13 @@ export const TOOL_BUDGETS = {
   // once per question while replacing dozens of exploratory calls.
   plan: 32000,
   eval: 24000,
+  // The full function set is the deliverable; measured worst case is ~22.5KB
+  // (Korea/standard/science). Over-budget must be an explicit error with the
+  // `formula:false` recovery, never a silent cut.
+  pace: 32000,
+  // One bounded page of function-call results; 24 calls × a state snapshot is
+  // the measured ceiling before the payload must be split.
+  paceEval: 24000,
   // One bounded page of the instance packet (the transport caps a tool result
   // at ~50k chars; oversize must be an error, never a silent cut).
   instance: 44000,
@@ -3254,6 +3261,14 @@ const RENDER = {
     budget: TOOL_BUDGETS.instance,
     recover: "该类超过预算时 execute 会直接报错；按 kind 拆小再取，不要交给传输层截断。",
   },
+  pace: {
+    budget: TOOL_BUDGETS.pace,
+    recover: "Set formula:false to get only summary + handle, then evaluate turns with civi6_pace_eval.",
+  },
+  paceEval: {
+    budget: TOOL_BUDGETS.paceEval,
+    recover: "Split the calls, lower milestones.limit, or replace state with cumulative+rate.",
+  },
   entity: {
     budget: TOOL_BUDGETS.entity,
     compact: compactEntityPayload,
@@ -4512,7 +4527,7 @@ function instanceTool(getKb) {
   return makeTool({
     name: "civi6_instance",
     description:
-      "Objective-free instance packet, one data class per call. Fetch section='core' first: it carries the hard constraints (civ/leader/speed/difficulty), the civ kit full text, the neutral indexes, city-states, global parameters, and manifest.classes with each class's whenToUse/rows/bytes. Every `cost` in this packet is already in this instance's speed units — `instance.costBasis` echoes the multiplier and the source; do not multiply by the speed percentage again. Then fetch ONLY the 2-5 classes the question touches (tech-tree, civic-tree, units, districts, buildings, tiles, multipliers, beliefs, promotions, governors) — do not fetch all of them. Every class returns definition (what the class is and what it does NOT contain) and whenToUse (when to ask for it) as separate fields. Every row is already join'd: [h, id, name, era, cost, fx, unres, ...content[kind].columns from index 7]; eff is the authoritative official text, fx the parsed formula summary, unres the count of unparsed mechanism rows (when >0 answer '数据层未解析' and do not fill in). Read `columns`/`legend`, never guess a position. There is no SQL tool and no per-entity drill-down tool: this packet plus civi6_eval plus civi6_meta is the whole data surface. Changing victory line does NOT require a re-fetch; changing civ/leader/speed does. A class that would exceed its budget fails loudly instead of being truncated.",
+      "Objective-free instance packet, one data class per call. Fetch section='core' first: it carries the hard constraints (civ/leader/speed/difficulty), the civ kit full text, the neutral indexes, city-states, global parameters, and manifest.classes with each class's whenToUse/rows/bytes. Every `cost` in this packet is already in this instance's speed units — `instance.costBasis` echoes the multiplier and the source; do not multiply by the speed percentage again. Then fetch ONLY the 2-5 classes the question touches (tech-tree, civic-tree, units, districts, buildings, tiles, multipliers, beliefs, promotions, governors) — do not fetch all of them. Every class returns definition (what the class is and what it does NOT contain) and whenToUse (when to ask for it) as separate fields. Every row is already join'd: [h, id, name, era, cost, fx, unres, ...content[kind].columns from index 7]; eff is the authoritative official text, fx the parsed formula summary, unres the count of unparsed mechanism rows (when >0 answer '数据层未解析' and do not fill in). Read `columns`/`legend`, never guess a position. There is no SQL tool and no per-entity drill-down tool: this packet plus civi6_eval, civi6_meta, civi6_pace and civi6_pace_eval is the whole data surface. The baseline timeline is NOT in this packet: after core, call civi6_pace once with the exact instance ids (civ/leader/speed) + victory, then evaluate turns with civi6_pace_eval. Changing victory line does NOT require a re-fetch; changing civ/leader/speed does. A class that would exceed its budget fails loudly instead of being truncated.",
     parameters: {
       type: "object",
       properties: {
@@ -4979,7 +4994,7 @@ function evalTool(getKb) {
   return makeTool({
     name: "civi6_eval",
     description:
-      "Deterministic scratchpad over the formula layer. Supply side: a candidate build set + city/pop/era assumptions -> per-dimension supply with the top contributors. Required side: a gate set (techs/civics/buildings/units/projects) -> prerequisite closure, per-currency ledger (required vs supply per turn, gap, verdict), ranked cut list with slipTurns, and low/base/high scenarios. Every cost it returns is already expressed in `speed` units (costMultiplier applied) and every deadline in `speed` turns (turnScale applied); `basis` echoes what was applied, supply is speed-invariant. Pass eraId whenever you pass gates — there is no default era. Fetches no data. Call it instead of doing arithmetic in prose.",
+      "Deterministic scratchpad over the formula layer. Supply side: a candidate build set + city/pop/era assumptions -> per-dimension supply with the top contributors. Required side: a gate set (techs/civics/buildings/units/projects) -> prerequisite closure, per-currency ledger (required vs supply per turn, gap, verdict), ranked cut list with slipTurns, and low/base/high scenarios. Every cost it returns is already expressed in `speed` units (costMultiplier applied) and every deadline in `speed` turns (turnScale applied); `basis` echoes what was applied, supply is speed-invariant. Pass eraId whenever you pass gates — there is no default era. Fetches no data. Call it instead of doing arithmetic in prose. This is a candidate-set ledger, NOT the baseline timeline: use civi6_pace for the baseline function set and civi6_pace_eval for per-turn values.",
     parameters: {
       type: "object",
       properties: {
@@ -5019,6 +5034,422 @@ function evalTool(getKb) {
     execute: (args) => {
       assertNoSource(args);
       return buildEvalResult(getKb().ctx, args ?? {});
+    },
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Pacing baseline tools
+//
+// `civi6_pace` builds the function set (data) for one exact instance × one
+// victory line; `civi6_pace_eval` applies that function set to explicit calls.
+// The engine lives in src/pacing and is compiled to dist/pacing by
+// `npm run pace:build`; it is imported lazily so a missing build is a clear
+// runtime error instead of a plugin-load failure.
+// ---------------------------------------------------------------------------
+const PACE_CACHE_LIMIT = 4;
+const PACE_CACHE = new Map();
+const PACE_VICTORIES = ["science", "culture", "religion", "domination", "diplomatic"];
+const PACE_ASSURANCES = ["standard", "strict"];
+const PACE_CALL_FNS = [
+  "cumulative",
+  "rate",
+  "state",
+  "cities",
+  "population",
+  "research",
+  "civic",
+  "builds",
+  "actionsAt",
+  "milestones",
+  "nextMilestone",
+  "milestone",
+  "baseline",
+  "checks",
+  "assumptions",
+  "basis",
+  "input",
+];
+
+const PACE_RUNTIME = new Map();
+
+/** Compiled engine path; anchored to `pacingRoot` so a moved/reinstalled plugin can still point at the repo. */
+function paceDistPath(root) {
+  return resolve(root, "dist", "pacing", "index.js");
+}
+
+/** Lazy import of the compiled engine; retries after a failed build/import. */
+async function loadPaceRuntime(root) {
+  const distPath = paceDistPath(root);
+  const hit = PACE_RUNTIME.get(distPath);
+  if (hit) return hit;
+  if (!existsSync(distPath)) {
+    return Promise.reject(
+      new Error(
+        `civi6_pace: 运行时未构建（缺 ${distPath}）。请在插件仓库运行 "npm run pace:build"；` +
+          "首次构建后下一次调用即可用（若已加载过旧产物，改 src/pacing 后需重载插件）。",
+      ),
+    );
+  }
+  const promise = import(pathToFileURL(distPath).href).catch((error) => {
+    PACE_RUNTIME.delete(distPath);
+    throw error;
+  });
+  PACE_RUNTIME.set(distPath, promise);
+  return promise;
+}
+
+/** The pacing engine only needs these four read methods. */
+function pacingKbAdapter(ctx) {
+  return {
+    hasTable: (table) => hasTable(ctx, table),
+    tableColumns: (table) => q(ctx, `PRAGMA table_info("${table}");`).map((row) => row.name),
+    all: (sql, ...params) => q(ctx, sql, ...params),
+    get: (sql, ...params) => q1(ctx, sql, ...params),
+  };
+}
+
+function assertPaceTables(ctx) {
+  const required = ["kb_node", "kb_formula", "kb_unlock", "kb_speed_profile", "kb_civ_profile", "kb_civ_entity_map"];
+  const missing = required.filter((table) => !hasTable(ctx, table));
+  if (missing.length) {
+    throw new Error(
+      `civi6_pace: 决策层缺失表 ${missing.join(" / ")}；先运行 "npm run kb:build"（或 "npm run kb:build:bbg"）并重载插件。`,
+    );
+  }
+}
+
+function assertPaceRoot(root) {
+  const baseline = resolve(root, "kb", "pacing", "baseline.json");
+  if (!existsSync(baseline)) {
+    throw new Error(
+      `civi6_pace: 找不到 ${baseline}；把插件配置 pacingRoot（或 workspaceRoot）指向仓库根目录后重载。`,
+    );
+  }
+}
+
+function metaBuiltAt(ctx, key) {
+  const row = q1(ctx, "SELECT value FROM _meta WHERE key = ?;", key);
+  if (!row?.value) return null;
+  try {
+    const parsed = JSON.parse(String(row.value));
+    return typeof parsed?.builtAt === "string" ? parsed.builtAt : null;
+  } catch {
+    return null;
+  }
+}
+
+function paceCacheGet(handle) {
+  const hit = PACE_CACHE.get(handle);
+  if (!hit) return null;
+  // LRU: re-insert on hit.
+  PACE_CACHE.delete(handle);
+  PACE_CACHE.set(handle, hit);
+  return hit;
+}
+
+function paceCacheSet(handle, formula) {
+  if (PACE_CACHE.has(handle)) PACE_CACHE.delete(handle);
+  PACE_CACHE.set(handle, formula);
+  while (PACE_CACHE.size > PACE_CACHE_LIMIT) {
+    PACE_CACHE.delete(PACE_CACHE.keys().next().value);
+  }
+}
+
+function echoCallArgs(call) {
+  const out = {};
+  for (const key of ["t", "key", "from", "to", "limit", "id"]) {
+    if (call[key] !== undefined) out[key] = call[key];
+  }
+  return out;
+}
+
+function normalizeDifficulty(value) {
+  return String(value ?? "")
+    .replace(/^DIFFICULTY_/i, "")
+    .toLowerCase();
+}
+
+function assertPaceRequest(input) {
+  if (typeof input.civ !== "string" || !input.civ) {
+    throw new Error("civi6_pace: civ 必填，且必须是 instance.instance.civ 的精确 id（CIVILIZATION_*）。");
+  }
+  if (typeof input.speed !== "string" || !input.speed) {
+    throw new Error("civi6_pace: speed 必填，必须是 instance.instance.speed。");
+  }
+  if (typeof input.victory !== "string" || !PACE_VICTORIES.includes(input.victory)) {
+    throw new Error(`civi6_pace: victory 必须是 ${PACE_VICTORIES.join(" / ")}。`);
+  }
+  if (input.leader !== undefined && input.leader !== null && typeof input.leader !== "string") {
+    throw new Error("civi6_pace: leader 必须是字符串 id（LEADER_*）或省略。");
+  }
+  if (input.assurance !== undefined && !PACE_ASSURANCES.includes(input.assurance)) {
+    throw new Error(`civi6_pace: assurance 必须是 ${PACE_ASSURANCES.join(" / ")}。`);
+  }
+  if (input.formula !== undefined && typeof input.formula !== "boolean") {
+    throw new Error("civi6_pace: formula 必须是布尔值。");
+  }
+}
+
+function paceTool(getKb, paceContext) {
+  return makeTool({
+    name: "civi6_pace",
+    description:
+      "Build the baseline function set for one exact instance × one victory line. Inputs are exact ids from civi6_instance — names, format and output paths are user-facing CLI conveniences and are rejected here. Returns civi6.pacing/formula/v1 (T, base/Δrate, city/pop steps, ids/labels, actions, milestones, and meta.baseline/checks/assumptions/provenance) plus a handle. feasible:false + meta.baseline.blockers is a result, not an error. T is the function horizon (self-side burst); meta.baseline.turn is the victory turn and may be later (science adds flight turns). Costs/slack are already in this instance's speed units — do not multiply by the speed again. Do NOT hand-compute the hinges: pass the handle to civi6_pace_eval. Changing victory needs a new pace call; changing civ/leader/speed needs a new instance first.",
+    parameters: {
+      type: "object",
+      properties: {
+        civ: {
+          type: "string",
+          description:
+            "Exact civilization id from instance.instance.civ (CIVILIZATION_*). Chinese/English names and fuzzy matches are rejected.",
+        },
+        leader: {
+          type: "string",
+          description:
+            "Exact leader id from instance.instance.leader (LEADER_*). Required when the civ has more than one leader; must belong to the civ.",
+        },
+        speed: {
+          type: "string",
+          enum: ["standard", "online"],
+          description: "Exact instance.instance.speed; every cost/turn in the function set is in this speed's units.",
+        },
+        victory: {
+          type: "string",
+          enum: PACE_VICTORIES,
+          description: "Authored victory line (kb/pacing/<victory>.json); the terminal spec is not caller-authored.",
+        },
+        assurance: {
+          type: "string",
+          enum: PACE_ASSURANCES,
+          description: "Baseline source policy. standard (default) includes declared map floors; strict uses rules sources only.",
+        },
+        targetTurn: {
+          type: "integer",
+          description:
+            "Optional reverse check. An infeasible target returns a target blocker; it never silently changes the constructed baseline.",
+        },
+        difficulty: {
+          type: "string",
+          description:
+            "Optional instance.instance.difficulty. The baseline is authored at deity; a mismatch is reported in warnings (values are unchanged).",
+        },
+        formula: {
+          type: "boolean",
+          description:
+            "Include the full function set (default true). false returns only summary (= functionSet.meta) + handle, for a lean handoff.",
+        },
+      },
+      required: ["civ", "speed", "victory"],
+    },
+    ...RENDER.pace,
+    execute: async (args) => {
+      assertNoSource(args);
+      const input = args ?? {};
+      assertPaceRequest(input);
+      const kb = getKb();
+      const ctx = kb.ctx;
+      assertPaceTables(ctx);
+      assertPaceRoot(paceContext.root);
+      const runtime = await loadPaceRuntime(paceContext.root);
+      let formula;
+      try {
+        formula = runtime.buildPaceFunctionSet(pacingKbAdapter(ctx), {
+          source: paceContext.source,
+          civ: input.civ,
+          leader: input.leader ?? null,
+          speed: input.speed,
+          victory: input.victory,
+          assurance: input.assurance ?? "standard",
+          targetTurn: input.targetTurn ?? null,
+          root: paceContext.root,
+        });
+      } catch (error) {
+        throw new Error(`civi6_pace: ${String(error?.message ?? error).replace(/^PaceBuildRequest:\s*/, "")}`);
+      }
+      const provenance = formula.meta.provenance;
+      const handle = runtime.encodePaceHandle({
+        version: 1,
+        source: provenance.ruleset,
+        civ: formula.meta.input.civId,
+        leader: formula.meta.input.leaderId,
+        speed: formula.meta.input.speed,
+        victory: formula.meta.input.victoryId,
+        assurance: formula.meta.input.assurance,
+        targetTurn: formula.meta.input.targetTurn,
+        rawBuiltAt: provenance.rawBuiltAt,
+        kbBuiltAt: provenance.kbBuiltAt,
+      });
+      const warnings = [];
+      if (input.difficulty) {
+        const modeled = String(formula.meta.assumptions?.difficulty ?? "");
+        const requested = normalizeDifficulty(input.difficulty);
+        if (requested && modeled && requested !== modeled.toLowerCase()) {
+          warnings.push({
+            code: "difficulty-modeled",
+            modeled,
+            requested,
+            note: "基准节奏只按 kb/pacing/baseline.json 的 difficulty 口径建模；数值不随难度变化，结论需带此前提。",
+          });
+        }
+      }
+      const payload = {
+        schema: "civi6.pacing/tool/v1",
+        handle,
+        ...(input.formula === false ? { summary: formula.meta } : { functionSet: formula }),
+        ...(warnings.length ? { warnings } : {}),
+        note:
+          "T 是函数域（我方 burst）；meta.baseline.turn 是胜利回合，可能更晚。求值请用 civi6_pace_eval + handle，" +
+          "不要把 functionSet 原样回传；换胜利线重新调用 civi6_pace，换文明/速度先重取 instance。",
+      };
+      const chars = JSON.stringify(payload).length;
+      if (chars > TOOL_BUDGETS.pace) {
+        throw new Error(
+          `civi6_pace: 函数集序列化为 ${chars} 字符，超过预算 ${TOOL_BUDGETS.pace}。` +
+            "请改用 formula:false 只取 summary + handle，再用 civi6_pace_eval 按需取值。",
+        );
+      }
+      paceCacheSet(handle, formula);
+      return payload;
+    },
+  });
+}
+
+function verifyPaceHandle(ctx, data, activeSource) {
+  if (data.source !== activeSource) {
+    throw new Error(
+      `civi6_pace_eval: handle 的规则是 "${data.source}"，当前插件锁定 "${activeSource}"；请按当前规则重新调用 civi6_pace。`,
+    );
+  }
+  const currentRaw = metaBuiltAt(ctx, "build");
+  const currentKb = metaBuiltAt(ctx, "kb.build");
+  if (data.rawBuiltAt !== currentRaw || data.kbBuiltAt !== currentKb) {
+    throw new Error(
+      `civi6_pace_eval: handle 与当前知识库构建不一致（handle raw=${data.rawBuiltAt ?? "null"} / kb=${data.kbBuiltAt ?? "null"}；` +
+        `当前 raw=${currentRaw ?? "null"} / kb=${currentKb ?? "null"}）。知识库已重建，请重新调用 civi6_pace。`,
+    );
+  }
+}
+
+function paceEvalTool(getKb, paceContext) {
+  return makeTool({
+    name: "civi6_pace_eval",
+    description:
+      "Evaluate a function set from civi6_pace. Pass handle (preferred) or a literal functionSet, plus 1-24 calls [{fn,t?,key?,from?,to?,limit?,id?}]. Values match the generated .mjs module (t<1→0/empty, t>T→last value and clamped:true, non-finite→error). fn: cumulative/rate/state/cities/population/research/civic/builds/actionsAt/milestones/nextMilestone/milestone/baseline/checks/assumptions/basis/input. milestones is windowed (from/to/limit) and returns {total, rows}; it never silently truncates. This is NOT civi6_eval: no ledger, no cut list, no scenario math.",
+    parameters: {
+      type: "object",
+      properties: {
+        handle: {
+          type: "string",
+          description:
+            "Handle returned by civi6_pace (pc1.*). Preferred handoff: cheap to copy and re-verifiable against the KB build.",
+        },
+        functionSet: {
+          type: "object",
+          description:
+            "Optional literal civi6.pacing/formula/v1 object. Use only when you already hold the data (external/offline); handle is preferred because echoing 8-22KB through the model is expensive and error-prone.",
+        },
+        calls: {
+          type: "array",
+          minItems: 1,
+          maxItems: 24,
+          items: {
+            type: "object",
+            properties: {
+              fn: { type: "string", enum: PACE_CALL_FNS },
+              t: { type: "number", description: "Turn for cumulative/rate/state/cities/population/research/civic/builds/actionsAt/nextMilestone." },
+              key: { type: "string", enum: ["science", "culture", "gold", "production", "food", "faith", "tourism"] },
+              from: { type: "number", description: "milestones window start (default 1)." },
+              to: { type: "number", description: "milestones window end (default T)." },
+              limit: { type: "integer", description: "Max rows for list functions, 1-100." },
+              id: { type: "string", description: "Entity id for fn='milestone'." },
+            },
+            required: ["fn"],
+          },
+        },
+      },
+      required: ["calls"],
+    },
+    ...RENDER.paceEval,
+    execute: async (args) => {
+      assertNoSource(args);
+      const input = args ?? {};
+      if (!Array.isArray(input.calls) || input.calls.length < 1) {
+        throw new Error("civi6_pace_eval: calls 必填，至少 1 条。");
+      }
+      if (input.calls.length > 24) {
+        throw new Error(`civi6_pace_eval: calls 最多 24 条（收到 ${input.calls.length}）；拆分后再调用。`);
+      }
+      const runtime = await loadPaceRuntime(paceContext.root);
+      let formula;
+      let sourceKind;
+      let handleUsed = null;
+      if (input.functionSet !== undefined) {
+        runtime.validatePaceFormula(input.functionSet);
+        formula = input.functionSet;
+        sourceKind = "functionSet";
+      } else if (typeof input.handle === "string" && input.handle) {
+        const data = runtime.decodePaceHandle(input.handle);
+        const ctx = getKb().ctx;
+        verifyPaceHandle(ctx, data, paceContext.source);
+        const cached = paceCacheGet(input.handle);
+        if (cached) {
+          formula = cached;
+        } else {
+          assertPaceTables(ctx);
+          assertPaceRoot(paceContext.root);
+          try {
+            formula = runtime.buildPaceFunctionSet(pacingKbAdapter(ctx), {
+              source: data.source,
+              civ: data.civ,
+              leader: data.leader,
+              speed: data.speed,
+              victory: data.victory,
+              assurance: data.assurance,
+              targetTurn: data.targetTurn,
+              root: paceContext.root,
+            });
+          } catch (error) {
+            throw new Error(
+              `civi6_pace_eval: 重建函数集失败：${String(error?.message ?? error).replace(/^PaceBuildRequest:\s*/, "")}`,
+            );
+          }
+          paceCacheSet(input.handle, formula);
+        }
+        sourceKind = "handle";
+        handleUsed = input.handle;
+      } else {
+        throw new Error("civi6_pace_eval: 需要 handle（来自 civi6_pace）或 functionSet。");
+      }
+      const results = input.calls.map((call, index) => {
+        let outcome;
+        try {
+          outcome = runtime.evaluatePacingFormula(formula, call ?? {});
+        } catch (error) {
+          throw new Error(`civi6_pace_eval: 第 ${index + 1} 条调用非法：${error.message}`);
+        }
+        return {
+          fn: call?.fn,
+          ...echoCallArgs(call ?? {}),
+          value: outcome.value,
+          ...(outcome.clamped ? { clamped: true } : {}),
+        };
+      });
+      const payload = {
+        schema: "civi6.pacing/eval/v1",
+        T: formula.T,
+        source: sourceKind,
+        ...(handleUsed ? { handle: handleUsed } : {}),
+        results,
+      };
+      const chars = JSON.stringify(payload).length;
+      if (chars > TOOL_BUDGETS.paceEval) {
+        throw new Error(
+          `civi6_pace_eval: 结果序列化为 ${chars} 字符，超过预算 ${TOOL_BUDGETS.paceEval}。` +
+            "拆分 calls、降低 milestones.limit，或用 cumulative+rate 代替 state。",
+        );
+      }
+      return payload;
     },
   });
 }
@@ -5355,10 +5786,11 @@ function buildReasoningPrompt() {
 “怎么玩 / 时代规划 / 取舍”类问题，数据只取一次，其余全靠公式与账本。
 
 1. 第 1 步只取 civi6_instance({ civ, leader, speed, difficulty, section:'core' })：它由硬约束决定，含文明套件全文、城邦、中立索引、GlobalParameters 子集，以及 gaps/omitted 两张“这里没有”的清单。然后读 core.manifest.classes 里每一类的 whenToUse 与 bytes，只再取问题真正涉及的 2~5 类（tech-tree / civic-tree / units / districts / buildings / tiles / multipliers / beliefs / promotions / governors），不要一次全取。换胜利线不重取；换文明或速度才重取。
-2. 每类都自带 definition（这一类是什么、不含什么）与 whenToUse（什么时候取），按需读，不要靠猜。行按 content[kind].columns 读，不要按位置猜：官方全文（eff）、已解析公式摘要（fx）、未解析计数（unres）、**成本（cost，已是本实例速度口径，见 instance.costBasis，不要再乘速度）**、解锁科技/市政（tech/civic）、前置（req）、单位战力/移动/维护/晋升类/战略资源/升级与取代（cs/rc/mv/mt/pc/res/up/replaces/replacedBy）、政策槽（slot）、信条类别（cls）、政体等级与槽位数（tier/slots）、晋升等级与列（lvl/col）、科技树位与解锁（treeRow/depth/children/unlocks）、总督归属（gov）、城邦宗主加成（cityStates）。数据面只有 instance / eval / meta，没有 SQL 工具，也没有单实体放大镜工具。
+2. 每类都自带 definition（这一类是什么、不含什么）与 whenToUse（什么时候取），按需读，不要靠猜。行按 content[kind].columns 读，不要按位置猜：官方全文（eff）、已解析公式摘要（fx）、未解析计数（unres）、**成本（cost，已是本实例速度口径，见 instance.costBasis，不要再乘速度）**、解锁科技/市政（tech/civic）、前置（req）、单位战力/移动/维护/晋升类/战略资源/升级与取代（cs/rc/mv/mt/pc/res/up/replaces/replacedBy）、政策槽（slot）、信条类别（cls）、政体等级与槽位数（tier/slots）、晋升等级与列（lvl/col）、科技树位与解锁（treeRow/depth/children/unlocks）、总督归属（gov）、城邦宗主加成（cityStates）。数据面只有 instance / eval / meta / pace / pace_eval，没有 SQL 工具，也没有单实体放大镜工具。
 3. 算账一律调用 civi6_eval，并且 **speed 必传**（与实例一致）、**给 gates 时 eraId 必传**（它决定分母；没有默认时代）。返回的 required / path.totalCost / cut.cost 已按该速度折算，deadline.turn 已按该速度压缩，supply 是不随速度变化的每回合产出；返回的 basis 字段回显了所用的 costMultiplier 与 turnScale。其余：builds 给供给侧、gates 给需求侧（会展开前置闭包并计成本）、ledger（每币种 required / requiredPerTurn / supplyPerTurn / gap / verdict）、cut（砍单与 slipTurns）、scenarios（low/base/high）与 composition（谁贡献了多少，带 fx_id）。想让某单位/建筑进 plan，就把它的 tech/civic 直接喂给 gates。禁止心算，禁止把描述文字当数字。
-4. 要某个数值确实不在包里时，先查 core.gaps 与 core.omitted——写在那里的一律回答“数据层未收录”，不得用记忆补；两者都没有就是看漏了行，回去按 columns 找。行内 unres 是“没有真实描述、已从 fx 丢弃的机制行数”：要数值却没有 fx、且 unres>0 时答“数据层未解析”，但不要因此否定同一行的 eff 文本。
-5. 答案固定 6 段：约束方程 / 供给计划 / 砍单 / 情景 / 路径 / 验收；每段引用 civi6_eval 字段与行内字段，末行“数据依据：BBG 7.5.1 / <entity ids 或句柄>”。`;
+4. 需要“基准时间表”（某回合的累计产出/速率/在研在建、里程碑、终局可行性）时：用 civi6_pace 按实例的精确 id 构建一次（civ=instance.instance.civ、leader=instance.instance.leader、speed=instance.instance.speed、victory=...），拿到 functionSet 与 handle；再用 civi6_pace_eval({handle, calls:[{fn,t,...}]}) 求值。不要把 functionSet 原样回传给执行器，也不要心算 base/Δ。T 是函数域（我方 burst），胜利回合看 meta.baseline.turn；t>T 按末值并标 clamped。feasible:false 是结论，引用 meta.baseline.blockers，不得改写成“可达”。pace 的 cost/slack 已按实例速度折算，不要再乘速度。换胜利线重新调用 civi6_pace，不必重取 instance；换文明/速度先重取 instance。
+5. 要某个数值确实不在包里时，先查 core.gaps 与 core.omitted——写在那里的一律回答“数据层未收录”，不得用记忆补；两者都没有就是看漏了行，回去按 columns 找。行内 unres 是“没有真实描述、已从 fx 丢弃的机制行数”：要数值却没有 fx、且 unres>0 时答“数据层未解析”，但不要因此否定同一行的 eff 文本。
+6. 答案固定 6 段：约束方程 / 供给计划 / 砍单 / 情景 / 路径 / 验收；每段引用 civi6_eval / civi6_pace / civi6_pace_eval 字段与行内字段，末行“数据依据：BBG 7.5.1 / <entity ids 或句柄>”。`;
 }
 
 function buildRulesetPrompt(ruleset, build) {
@@ -5375,8 +5807,8 @@ function buildRulesetPrompt(ruleset, build) {
 - 数值纪律：凡是数（产出/成本/加成/伤害）一律来自工具返回的结构化字段或公式行（dimension + op + value）；文本只用于说明与审计，禁止从文字心算。
 - 内部 ID 的前缀不编码归属：例如 GOVERNOR_PROMOTION_EDUCATOR_* 在 BBG 里可能属于其他总督。总督/晋升归属只认 civi6_instance 的 governors 类里 gov 列（或 v_governor_promotion 视图），禁止按 ID 前缀、名称片段或旧对话推断。
 - 行内 eff 是已解析的权威效果文本，fx 是可执行公式；unres 只是未解析机制计数（>0 即“数据层未解析”）。用户问效果时只引用 eff/fx，不要用记忆补写隐藏机制。
-- 决策数值来自 civi6_eval 的公式组合与计划带（empirical/rule），引用时保留 confidence/source。
-- 成本与回合都带速度口径：行内 cost、eval 的 required/cut/deadline 已按 speed 折算，basis 与 instance.costBasis 回显 costMultiplier 与 turnScale。不要再乘 50% 或在标准/联机之间二次换算；要换档就换实例的 speed 重新取。
+- 决策数值来自 civi6_eval 的公式组合与计划带（empirical/rule）；基准节奏来自 civi6_pace（含 meta.checks 证书与 baseline.blockers），按回合求值来自 civi6_pace_eval；引用时保留 confidence/source，三者不要混用。
+- 成本与回合都带速度口径：行内 cost、eval 的 required/cut/deadline、pace 的 cost/slack 已按 speed 折算，basis 与 instance.costBasis 回显 costMultiplier 与 turnScale。不要再乘 50% 或在标准/联机之间二次换算；要换档就换实例的 speed 重新取。
 - 回答含文明6事实时，末尾加：数据依据：${label} / <entity ids>。
 - 用户要另一套规则时，说明需修改插件配置 ruleset 并重载，不能按调用切换。${excluded.length ? `\n- 可选子模组未启用：${excluded.join("、")}。` : ""}`;
 }
@@ -5402,6 +5834,13 @@ export function apply(ctx, config = {}) {
   }
 
   const ruleset = normalizeRuleset(config.ruleset ?? config.dataSource ?? process.env.CIVI6_DATA_SOURCE) ?? "vanilla";
+  const configuredPacingRoot = config.pacingRoot ? String(config.pacingRoot) : undefined;
+  const pacingRoot = configuredPacingRoot
+    ? isAbsolute(configuredPacingRoot)
+      ? configuredPacingRoot
+      : resolve(PLUGIN_DIR, configuredPacingRoot)
+    : workspaceRoot ?? resolve(PLUGIN_DIR, "..");
+  const paceContext = { root: pacingRoot, source: ruleset };
   const activePath = paths[ruleset];
   if (!activePath) {
     throw new Error(`civi6-kb: no database path configured for ruleset "${ruleset}"`);
@@ -5532,8 +5971,9 @@ export function apply(ctx, config = {}) {
     });
   }
 
-  // Model-facing surface (3 tools): data once as self-describing classes
-  // (instance), arithmetic (eval), provenance (meta).
+  // Model-facing surface (5 tools): data once as self-describing classes
+  // (instance), arithmetic (eval), provenance (meta), and the baseline function
+  // set split into build (pace) + call evaluation (pace_eval).
   // `civi6_sql` is deliberately NOT registered: as long as a raw query escape
   // hatch exists, the packet never has to be good enough — the measured session
   // (62 SQL calls after a complete fetch) is the counterexample.
@@ -5546,6 +5986,8 @@ export function apply(ctx, config = {}) {
   ctx.tools.register(metaTool(getKb));
   ctx.tools.register(instanceTool(getKb));
   ctx.tools.register(evalTool(getKb));
+  ctx.tools.register(paceTool(getKb, paceContext));
+  ctx.tools.register(paceEvalTool(getKb, paceContext));
 
   ctx.effect(() => () => {
     try {
