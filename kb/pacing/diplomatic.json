@@ -1,0 +1,32 @@
+{
+  "victoryId": "diplomatic",
+  "nameZh": "外交胜利",
+  "version": 1,
+  "guarantee": "self-side",
+  "terminal": {
+    "kind": "congress",
+    "pointsRequired": 20,
+    "pointsPerCongress": 4,
+    "firstCongressTurn": 90,
+    "everyTurns": 30
+  },
+  "bottlenecks": ["gold_per_turn", "culture_per_turn"],
+  "boosters": {
+    "districts": ["DISTRICT_DIPLOMATIC_QUARTER", "DISTRICT_COMMERCIAL_HUB"],
+    "buildings": ["BUILDING_MONUMENT", "BUILDING_MARKET", "BUILDING_BANK"]
+  },
+  "policies": [],
+  "government": null,
+  "cityTarget": [
+    { "turn": 1, "cities": 1 },
+    { "turn": 50, "cities": 4 },
+    { "turn": 100, "cities": 8 },
+    { "turn": 150, "cities": 10 }
+  ],
+  "reference": {
+    "turn": 265,
+    "sourceFlag": "empirical",
+    "confidence": 0.35,
+    "note": "每届议会得点数按经验值；援助/竞赛/城邦宗主未建模"
+  }
+}

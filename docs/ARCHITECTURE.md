@@ -21,6 +21,7 @@ L1.5 效果事实      effect_cards / modifier_text / requirement_text
 L2   轴            kb_dimension / kb_victory / kb_era_window / kb_speed_profile
 L2'  公式层        kb_formula / kb_formula_owner / kb_requirement_set
 L3   决策切片      kb_plan / kb_target / kb_budget / kb_check / kb_derivation
+L3b  派生节奏      src/pacing（查询期现算，不落表）
 L4   文明          kb_civ_profile / kb_civ_entity_map / kb_civ_delta / kb_civ_capability
 L5   检索          kb_card / v_kb_* 视图 / search_docs（BM25 倒排索引）
 工具面             civi6_meta / civi6_instance / civi6_eval（模型唯一入口）
@@ -33,6 +34,7 @@ L5   检索          kb_card / v_kb_* 视图 / search_docs（BM25 倒排索引�
 | L1.5 | 每个实体一张效果卡 | 官方怎么描述、哪些已解析 |
 | L2 | 公式行与坐标轴 | 到底怎么算、按什么单位算 |
 | L3 | 计划带、目标、检查点 | 某个时刻帝国该是什么状态 |
+| L3b | 基准节奏（现算） | 任意速度 × 文明 × 胜利线，每个 T 之前必须完成什么 |
 | L4 | 文明修正 | 这个文明的套件改变了哪些约束 |
 | L5 | 文档与倒排索引 | 从哪里开始找 |
 | 工具面 | 按类切好的数据包 + 算账结果 | 模型这一轮该拿什么、该算什么 |
@@ -56,9 +58,10 @@ src/                   构建管线（把游戏/BBG 数据摄取成 SQLite）
   ruleset.ts           _meta.ruleset 规则身份清单
   searchindex.ts / tokenize.ts  倒排索引、统计预计算、分词
   kb/                  决策知识层（节点/路径/约束/焦点/账本/砍单/情景/文明/校验）
+  pacing/              基准节奏生成器（图/产出代数/前向构造/反向截止/证书/输出）
   bbg/                 modinfo 解析、BBG SQL 应用、固定版本源码下载
 scripts/               ts-loader、verify-*（sources/effects/spec-parity/plugin/kb）、analyze-session
-kb/                    策划 JSON（dimensions/victories/eras/speeds/plans/civs）+ 决策层设计文档
+kb/                    策划 JSON（dimensions/victories/eras/speeds/plans/civs + pacing/baseline + pacing/*）+ 决策层设计文档
 model/                 数值思路材料（非权威，不参与构建）
 docs/                  快速开始 / 架构方案 / 接入方式
 data/                  构建产物：标准库、BBG 库、BBG 源码缓存（gitignore）
@@ -146,6 +149,15 @@ scope + dimension + op + value (+ per + condition)
 > **已退役：作者目标层**。`kb/objectives/*` 与 `kb_objective` / `kb_path*` / `kb_constraint*` / `kb_era_focus` / `kb_supply_source` / `kb_ledger` / `kb_cut` / `kb_scenario` / `kb_robustness` 这批表保持为空。原因是它把"取数"绑在"优化目标"上：只有手写过的（文明 × 胜利 × 速度）组合才有数据包，其余问题退化成探索。现在数据由 `civi6_instance` 按硬约束一次给完，账本由 `civi6_eval` 在查询期按公式现算。
 
 决策层的详细设计与编写规范见 [kb/README.md](../kb/README.md)。注意：该文档部分章节描述的是上述已退役目标层，阅读时以本节的现状为准。
+
+### 6.1 基准节奏：派生层，不复活退役目标层
+
+退役目标层的教训是「不要把取数绑在手写组合上」。基准节奏（`src/pacing/`、`kb/pacing/*.json`）走相反的路：
+
+- 作者数据只有 1 个口径（`baseline.json`：地块/区域保底、来源白名单、迭代轮数）+ 5 个胜利目标（终局谓词、瓶颈币种、参照回合）；
+- 路径、成本、产出、回合数在查询期由 `kb_node` / `kb_unlock` / `kb_formula` / `kb_civ_*` / `kb_speed_profile` / `kb_era_window` 现算，**不落 `kb_*` 表**；
+- 输出默认是**可 `import` 的零依赖 ESM 公式模块**（base + 速率差分，按调用计算；科学/标准约 28KB；JSON 仍是 `--format=json` 的精确契约），证书逐回合复核成本覆盖、同城前置、来源合法与单调性；
+- 它不替代 `kb_plan`：后者是经验参照，前者的 `referenceTurn` 只用于对照。详细公式与实测见 [基准节奏](PACING.md)。
 
 ## 7. 数据面契约
 

@@ -1,0 +1,106 @@
+{
+  "version": 1,
+  "labelZh": "基准节奏口径",
+  "assumptions": {
+    "difficulty": "deity",
+    "mapProfile": "standard_continents",
+    "opponents": 7,
+    "startingEra": "ERA_ANCIENT",
+    "population": {
+      "sciencePerPop": 0.5,
+      "culturePerPop": 0.3,
+      "goldPerPop": 0.5
+    },
+    "tileFloor": {
+      "standard": {
+        "foodPerPop": 3.0,
+        "productionPerPop": 3.0,
+        "housingPerCity": 12
+      },
+      "strict": {
+        "foodPerPop": 2.0,
+        "productionPerPop": 0,
+        "housingPerCity": 0
+      }
+    },
+    "districtFloor": {
+      "standard": {
+        "DISTRICT_CAMPUS": {
+          "science_per_turn": 10
+        },
+        "DISTRICT_HOLY_SITE": {
+          "faith_per_turn": 4
+        },
+        "DISTRICT_COMMERCIAL_HUB": {
+          "gold_per_turn": 9
+        },
+        "DISTRICT_THEATER": {
+          "culture_per_turn": 3
+        },
+        "DISTRICT_INDUSTRIAL_ZONE": {
+          "production_per_turn": 6
+        },
+        "DISTRICT_HARBOR": {
+          "gold_per_turn": 6
+        }
+      },
+      "strict": {}
+    },
+    "cityCenter": {
+      "food": 2,
+      "production": 2,
+      "gold": 0
+    },
+    "foodConsumptionPerPop": 2,
+    "growth": {
+      "threshold": 15,
+      "multiplier": 8,
+      "exponent": 1.5
+    },
+    "housingBase": 2,
+    "districtSlotPerPop": 3,
+    "settlerPopFloor": 2,
+    "highPopThreshold": 10,
+    "campusHighAdjacencyFloor": 2
+  },
+  "sources": {
+    "allowModifierTypes": [
+      "MODIFIER_PLAYER_CITIES_ADJUST_CITY_YIELD_MODIFIER",
+      "MODIFIER_PLAYER_CITIES_ADJUST_CITY_YIELD_CHANGE",
+      "MODIFIER_PLAYER_CITIES_ADJUST_CITY_ALL_YIELDS_CHANGE",
+      "MODIFIER_PLAYER_CITIES_ADJUST_CITY_YIELD_PER_POPULATION",
+      "MODIFIER_PLAYER_CAPITAL_CITY_ADJUST_CITY_YIELD_CHANGE",
+      "MODIFIER_PLAYER_DISTRICTS_ADJUST_YIELD_MODIFIER",
+      "MODIFIER_PLAYER_DISTRICTS_ADJUST_YIELD_CHANGE",
+      "MODIFIER_PLAYER_CITIES_ADJUST_POLICY_HOUSING",
+      "MODIFIER_PLAYER_CITIES_ADJUST_POLICY_AMENITY",
+      "MODIFIER_PLAYER_ADJUST_DIPLOMATIC_VICTORY_POINTS",
+      "MODIFIER_PLAYER_CITIES_ADJUST_GREAT_PERSON_POINT"
+    ],
+    "excludedOwnerKinds": [
+      "greatperson",
+      "belief",
+      "improvement",
+      "resource",
+      "feature",
+      "terrain",
+      "promotion",
+      "governor",
+      "governor_promotion"
+    ],
+    "knownConditions": {
+      "CAMPUS_HAS_HIGH_ADJACENCY": "campusHighAdjacency",
+      "CITY_HAS_HIGH_POPULATION": "highPop",
+      "CITY_HAS_MILITARY_ACADEMY_OR_SEAPORT": "never"
+    }
+  },
+  "tick": {
+    "maxPasses": 4,
+    "epsilon": 0.01
+  },
+  "output": {
+    "sampleStep": 5,
+    "maxMilestones": 140,
+    "maxActions": 220
+  }
+}

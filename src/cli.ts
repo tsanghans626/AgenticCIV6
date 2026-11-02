@@ -1,4 +1,5 @@
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
 import { loadBbgConfig, loadConfig, loadOutputConfig, type DataSource } from "./config.js";
 import { build, buildBbg, type BuildResult, type BbgBuildInfo } from "./build.js";
 import { KnowledgeDb } from "./db.js";
@@ -8,6 +9,14 @@ import { fetchBbgSources } from "./bbg/fetch.js";
 import { buildEffectCards, ensureEffectCards } from "./effects.js";
 import { buildEntityIndex } from "./entities.js";
 import { buildRulesetInfo, readRulesetMeta, writeRulesetMeta } from "./ruleset.js";
+import {
+  buildPacing,
+  renderPacing,
+  verifyPacing,
+  type Assurance,
+  type PacingFormat,
+  type VictoryId,
+} from "./pacing/index.js";
 
 const [, , cmd, ...rest] = process.argv;
 
@@ -113,6 +122,69 @@ async function main() {
         const stats = buildSearchIndex(kb);
         buildStats(kb);
         console.log(`\n完成 ✅  ${stats.docs} 篇文档 / ${stats.terms} 词 / ${stats.postings} 倒排项`);
+      } finally {
+        kb.close();
+      }
+      break;
+    }
+
+
+    case "pace": {
+      const source = parseSource();
+      if (source === "all") throw new Error("pace 不支持 --source all");
+      const { dbFile } = loadOutputConfig(source);
+      if (!existsSync(dbFile)) {
+        throw new Error(`知识库不存在：${dbFile}\n请先运行：${source === "bbg" ? "npm run build:bbg" : "npm run build"}`);
+      }
+      const victory = String(argValue("--victory", "-v") ?? "science") as VictoryId;
+      const civ = String(argValue("--civ", "-c") ?? "CIVILIZATION_AMERICA");
+      const leader = argValue("--leader") ?? null;
+      const speed = String(argValue("--speed") ?? "standard");
+      const assuranceRaw = String(argValue("--assurance") ?? "standard");
+      if (assuranceRaw !== "standard" && assuranceRaw !== "strict") {
+        throw new Error(`未知 assurance：${assuranceRaw}（可用 standard / strict）`);
+      }
+      const assurance = assuranceRaw as Assurance;
+      const targetRaw = argValue("--target-turn");
+      const targetTurn = targetRaw ? Number(targetRaw) : null;
+      const formatRaw = String(argValue("--format") ?? "js").toLowerCase();
+      const format: PacingFormat =
+        formatRaw === "js" || formatRaw === "mjs" || formatRaw === "module"
+          ? "js"
+          : formatRaw === "json" || formatRaw === "csv" || formatRaw === "md"
+            ? formatRaw
+            : (() => {
+                throw new Error(`未知 --format：${formatRaw}（可用 js / json / csv / md）`);
+              })();
+      const out = argValue("--out");
+      const kb = new KnowledgeDb(dbFile);
+      try {
+        const result = buildPacing(kb, {
+          source,
+          civId: civ,
+          leaderId: leader,
+          victoryId: victory,
+          speed,
+          assurance,
+          targetTurn,
+          root: process.cwd(),
+        });
+        const verification = verifyPacing(result);
+        const text = renderPacing(result, { format });
+        if (out) {
+          mkdirSync(dirname(out), { recursive: true });
+          writeFileSync(out, text, "utf8");
+          console.error(`已写入 ${out}`);
+        } else {
+          process.stdout.write(text + (text.endsWith("\n") ? "" : "\n"));
+        }
+        console.error(
+          `certificate: ${verification.ok ? "ok" : "FAILED"}（${verification.issues.length} 项）· ` +
+            `${result.baseline.feasible ? "feasible" : "infeasible"} · T=${result.baseline.turn ?? "-"} · ` +
+            `ref=${result.baseline.referenceTurn} · excluded=${result.provenance.excludedEffects}`,
+        );
+        for (const issue of verification.issues.slice(0, 8)) console.error(`  - ${issue}`);
+        if (!verification.ok) process.exitCode = 1;
       } finally {
         kb.close();
       }
@@ -256,6 +328,9 @@ async function main() {
   npm run kb:build:bbg      重建 BBG 决策层
   npm run kb:verify         校验决策层、对照锚点与查询基准
   npm run verify:effects    校验效果事实层的已知事实与文本完整性
+  npm run pace -- --victory=science --civ=CIVILIZATION_ROME --speed=standard
+                            生成基准节奏函数集（默认 --format=js；可加 --format=json|csv|md / --assurance=strict / --target-turn）
+  npm run pace:verify       校验基准节奏证书（成本覆盖/前置/确定性/速度关系）
 
 可选参数:
   --source, -s vanilla|bbg|all   选择数据源（build 默认 vanilla）

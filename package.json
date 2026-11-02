@@ -26,7 +26,9 @@
     "verify:plugin": "node scripts/verify-plugin.mjs",
     "verify:effects": "node scripts/verify-effects.mjs && npm run verify:parity && npm run verify:plugin",
     "sessions:analyze": "node scripts/analyze-session.mjs",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "pace": "node --import ./scripts/ts-loader.mjs src/cli.ts pace",
+    "pace:verify": "node --import ./scripts/ts-loader.mjs scripts/verify-pacing.mjs"
   },
   "dependencies": {
     "fast-xml-parser": "^4.4.1"

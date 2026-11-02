@@ -1,0 +1,35 @@
+{
+  "victoryId": "religion",
+  "nameZh": "宗教胜利",
+  "version": 1,
+  "guarantee": "self-side",
+  "terminal": {
+    "kind": "yield-target",
+    "metric": "faith_per_turn",
+    "mode": "cumulative",
+    "target": {
+      "value": 5000,
+      "sourceFlag": "empirical",
+      "note": "把 7 个对手各 >50% 城市改宗所需的传教/使徒信仰；对手城数按 8 城/家折算"
+    }
+  },
+  "bottlenecks": ["faith_per_turn"],
+  "boosters": {
+    "districts": ["DISTRICT_HOLY_SITE"],
+    "buildings": ["BUILDING_SHRINE", "BUILDING_TEMPLE", "BUILDING_MONUMENT", "BUILDING_GRANARY"]
+  },
+  "policies": [],
+  "government": null,
+  "cityTarget": [
+    { "turn": 1, "cities": 1 },
+    { "turn": 50, "cities": 4 },
+    { "turn": 100, "cities": 8 },
+    { "turn": 150, "cities": 10 }
+  ],
+  "reference": {
+    "turn": 220,
+    "sourceFlag": "empirical",
+    "confidence": 0.4,
+    "note": "对手审判官/宗教压力未建模；只保证我方信仰供给"
+  }
+}

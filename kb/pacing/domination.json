@@ -1,0 +1,38 @@
+{
+  "victoryId": "domination",
+  "nameZh": "统治胜利",
+  "version": 1,
+  "guarantee": "self-side",
+  "terminal": {
+    "kind": "units",
+    "units": [
+      { "id": "UNIT_INFANTRY", "qty": 8 },
+      { "id": "UNIT_SIEGE_TOWER", "qty": 2 }
+    ]
+  },
+  "bottlenecks": ["production_per_turn", "science_per_turn"],
+  "boosters": {
+    "districts": ["DISTRICT_ENCAMPMENT", "DISTRICT_INDUSTRIAL_ZONE", "DISTRICT_COMMERCIAL_HUB"],
+    "buildings": [
+      "BUILDING_WORKSHOP",
+      "BUILDING_FACTORY",
+      "BUILDING_MARKET",
+      "BUILDING_BANK",
+      "BUILDING_MONUMENT"
+    ]
+  },
+  "policies": [],
+  "government": null,
+  "cityTarget": [
+    { "turn": 1, "cities": 1 },
+    { "turn": 50, "cities": 4 },
+    { "turn": 100, "cities": 8 },
+    { "turn": 150, "cities": 12 }
+  ],
+  "reference": {
+    "turn": 235,
+    "sourceFlag": "empirical",
+    "confidence": 0.4,
+    "note": "对手城防/部队未建模；只保证我方军力在回合前就位"
+  }
+}

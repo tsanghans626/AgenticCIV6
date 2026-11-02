@@ -1,0 +1,40 @@
+{
+  "victoryId": "culture",
+  "nameZh": "文化胜利",
+  "version": 1,
+  "guarantee": "self-side",
+  "terminal": {
+    "kind": "yield-target",
+    "metric": "tourism_per_turn",
+    "mode": "cumulative",
+    "target": {
+      "value": 32000,
+      "sourceFlag": "rule",
+      "note": "国际游客 > 对手国内游客；按 160 名国内游客 × TOURISM_TOURISM_TO_MOVE_CITIZEN(200) 折算"
+    }
+  },
+  "bottlenecks": ["culture_per_turn", "tourism_per_turn"],
+  "boosters": {
+    "districts": ["DISTRICT_THEATER", "DISTRICT_COMMERCIAL_HUB"],
+    "buildings": [
+      "BUILDING_MONUMENT",
+      "BUILDING_AMPHITHEATER",
+      "BUILDING_MARKET",
+      "BUILDING_BANK"
+    ]
+  },
+  "policies": [],
+  "government": null,
+  "cityTarget": [
+    { "turn": 1, "cities": 1 },
+    { "turn": 50, "cities": 4 },
+    { "turn": 100, "cities": 9 },
+    { "turn": 150, "cities": 13 }
+  ],
+  "reference": {
+    "turn": 250,
+    "sourceFlag": "empirical",
+    "confidence": 0.4,
+    "note": "对手文化/伟作/奇观均未建模；本线只保证我方旅游侧，胜利回合仅作参考"
+  }
+}

@@ -1,0 +1,83 @@
+{
+  "victoryId": "science",
+  "nameZh": "科技胜利",
+  "version": 1,
+  "guarantee": "full",
+  "terminal": {
+    "kind": "space-race",
+    "spaceport": "DISTRICT_SPACEPORT",
+    "projects": [
+      "PROJECT_LAUNCH_EARTH_SATELLITE",
+      "PROJECT_LAUNCH_MOON_LANDING",
+      "PROJECT_LAUNCH_MARS_BASE",
+      "PROJECT_LAUNCH_MARS_HABITATION",
+      "PROJECT_LAUNCH_MARS_HYDROPONICS",
+      "PROJECT_LAUNCH_MARS_REACTOR",
+      "PROJECT_LAUNCH_EXOPLANET_EXPEDITION"
+    ],
+    "flight": {
+      "baseTurns": 50,
+      "perLaser": 1,
+      "laserProjects": [
+        "PROJECT_TERRESTRIAL_LASER",
+        "PROJECT_ORBITAL_LASER"
+      ],
+      "maxLasers": 0
+    },
+    "spaceports": 3
+  },
+  "bottlenecks": [
+    "science_per_turn",
+    "production_per_turn"
+  ],
+  "boosters": {
+    "districts": [
+      "DISTRICT_CAMPUS",
+      "DISTRICT_COMMERCIAL_HUB",
+      "DISTRICT_INDUSTRIAL_ZONE"
+    ],
+    "buildings": [
+      "BUILDING_LIBRARY",
+      "BUILDING_UNIVERSITY",
+      "BUILDING_RESEARCH_LAB",
+      "BUILDING_MARKET",
+      "BUILDING_BANK",
+      "BUILDING_STOCK_EXCHANGE",
+      "BUILDING_WORKSHOP",
+      "BUILDING_FACTORY",
+      "BUILDING_GRANARY",
+      "BUILDING_MONUMENT"
+    ]
+  },
+  "policies": [
+    "POLICY_NATURAL_PHILOSOPHY",
+    "POLICY_RATIONALISM",
+    "POLICY_FIVE_YEAR_PLAN",
+    "POLICY_INTEGRATED_SPACE_CELL"
+  ],
+  "government": "GOVERNMENT_COMMUNISM",
+  "cityTarget": [
+    {
+      "turn": 1,
+      "cities": 1
+    },
+    {
+      "turn": 50,
+      "cities": 4
+    },
+    {
+      "turn": 100,
+      "cities": 9
+    },
+    {
+      "turn": 150,
+      "cities": 14
+    }
+  ],
+  "reference": {
+    "turn": 250,
+    "sourceFlag": "empirical",
+    "confidence": 0.5,
+    "note": "kb_plan.burst_turn：航天项目完成回合；胜利回合另加飞行回合"
+  }
+}
