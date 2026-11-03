@@ -30,15 +30,15 @@ AgenticCIV6 的核心是一个宿主无关的知识库与查询契约；"怎么�
 
 | 调用 | 输入 | 输出 | 禁止 |
 | --- | --- | --- | --- |
-| `civi6_meta` | 无（可选 `verbose:true`） | 当前规则（`ruleset`/`locked`）、构建元信息、效果/公式覆盖率、速度档（`speedProfiles`：回合数 / 成本百分比）；`verbose` 时附实体类型清单、完整表清单、构建加载顺序 | 不作数据查询入口 |
-| `civi6_instance` | `civ` / `leader` / `speed` / `difficulty` / `section` | 一类数据：`instance`（含 `costBasis`）+ `content` + `definition` + `whenToUse` + `legend` + `gaps` / `omitted` + `manifest.classes` | 没有目标参数，不接受 `source` |
-| `civi6_eval` | `builds` / `gates` / `cities` / `popPerCity` / `eraId` / `eraIndex` / `speed` / `victory` | 供给侧 `metrics` + 需求侧 `ledger` / `cut` / `scenarios` / `path` / `deadline` + `basis` + `composition` | 不取数，只做公式组合 |
-| `civi6_pace` | `civ` / `leader?` / `speed` / `victory` / `assurance?` / `targetTurn?` / `difficulty?` / `formula?`（**只接受 instance 已解析的精确 id**） | `functionSet`（`civi6.pacing/formula/v1`：`T/base/delta/counts/actions/milestones/meta`）+ `handle`；`formula:false` 时为 `summary` + `handle` | 拒绝名字/中文名/`format`/`out`/`source`；不生成 `.mjs` 文本、不写文件 |
-| `civi6_pace_eval` | `handle`（或字面 `functionSet`）+ `calls[{fn,t?,key?,from?,to?,limit?,id?}]` | 与生成模块逐回合一致的求值（1–24 条）；`milestones` 返回 `{total,rows}` | 不做账本/砍单/情景（那是 `civi6_eval`）；超 24KB 整批报错，不截断 |
+| `civi6_meta` | `layer?` / `verbose?` | `layers[]`（从各库 `_meta.ruleset` 自动发现：id / label / dbFile / builtAt / available / default）、`defaultLayer`、`layerSelection:"per-call"`、`locked:false`、`readOnly:true`；传 `layer` 时附该层构建元信息、效果/公式覆盖率、速度档；`verbose` 时附实体类型清单、完整表清单、构建加载顺序 | 不作数据查询入口；列出的层必须来自库元数据，不是配置枚举 |
+| `civi6_instance` | `layer?` / `civ` / `leader` / `speed` / `difficulty` / `section` | 一类数据：`layer`（id/label/dbFile/builtAt）+ `instance`（含 `costBasis`）+ `content` + `definition` + `whenToUse` + `legend` + `gaps` / `omitted` + `manifest.classes` | 没有目标参数，不接受 `source` 或原始库路径；`layer` 必须是 `civi6_meta.layers` 中的层 |
+| `civi6_eval` | `layer?` / `builds` / `gates` / `cities` / `popPerCity` / `eraId` / `eraIndex` / `speed` / `victory` | 供给侧 `metrics` + 需求侧 `ledger` / `cut` / `scenarios` / `path` / `deadline` + `basis` + `composition`；顶层回显 `layer` | 不取数，只做公式组合；应与 instance 同层 |
+| `civi6_pace` | `layer?` / `civ` / `leader?` / `speed` / `victory` / `assurance?` / `targetTurn?` / `difficulty?` / `formula?`（**只接受 instance 已解析的精确 id**） | `functionSet`（`civi6.pacing/formula/v1`：`T/base/delta/counts/actions/milestones/meta`）+ `handle`（`source` = 层 id）；`formula:false` 时为 `summary` + `handle` | 拒绝名字/中文名/`format`/`out`/`source`；不生成 `.mjs` 文本、不写文件 |
+| `civi6_pace_eval` | `handle`（或字面 `functionSet`）+ `calls[{fn,t?,key?,from?,to?,limit?,id?}]` | 与生成模块逐回合一致的求值（1–24 条）；`milestones` 返回 `{total,rows}`；`layer` 从 handle/functionSet 继承 | 不做账本/砍单/情景（那是 `civi6_eval`）；超 24KB 整批报错，不截断 |
 
-- 取数只有一个入口：先 `civi6_instance(section='core')` 拿硬约束与 `manifest`，再只取问题涉及的 2~5 类。
-- `civi6_eval` 的 `speed` 必填；给 `gates` 时 `eraId` 必填（没有默认时代，它决定分母）。
-- 需要基准时间表时：`civi6_pace`（精确 id + victory，一次）→ `civi6_pace_eval`（handle + 调用，多次）。换胜利线不必重取 instance；换文明/速度才重取。
+- 取数只有一个入口：先 `civi6_meta()` 拿 `layers`/`defaultLayer`，再 `civi6_instance({layer, section:'core'})` 拿硬约束与 `manifest`，再只取问题涉及的 2~5 类。
+- `civi6_eval` 的 `layer` 应与 instance 相同；`speed` 必填；给 `gates` 时 `eraId` 必填（没有默认时代，它决定分母）。
+- 需要基准时间表时：`civi6_pace`（layer + 精确 id + victory，一次）→ `civi6_pace_eval`（handle + 调用，多次；不再传 layer）。换胜利线或 layer 不必重取 instance；换文明/速度才重取。
 - `pace` 的 `T` 是函数域（我方 burst），`meta.baseline.turn` 是胜利回合（可能更晚）；`t>T` 取末值并标 `clamped`。`feasible:false` + `blockers` 是结论，不是错误。
 - 所有成本/回合已是实例速度口径，返回的 `costBasis` / `basis` / pace 的 `cost`·`slack` 回显 `costMultiplier` 与 `turnScale`；`supply` 不随速度缩放。**接入层不得再次乘以速度百分比，也不得自行换算标准/联机。**
 
@@ -50,11 +50,14 @@ AgenticCIV6 的核心是一个宿主无关的知识库与查询契约；"怎么�
 - 单类超过 44,000 字符**直接报错**，由接入层原样透出错误，不允许截断后继续。
 - `gaps` / `omitted` 是硬契约：写在这里的一律回答"数据层未收录"，不得用记忆补。
 
-### 1.3 规则锁定
+### 1.3 数值层选择与 fail-closed
 
-- 规则由配置决定，运行期没有按调用切换的 `source` 参数。
-- 启动时校验 `_meta.build.dataSource`、`_meta.ruleset.id`、`_meta.effects.rawBuiltAt`、`kb.build.rawBuiltAt` 与 BBG 基座时间戳；不一致就拒绝服务（fail closed）。
-- 缺效果事实层时（`effectCardsRequired: true`）同样拒绝启动，避免退回"靠模型记忆描述效果"。
+- 数值层 = 一套已构建知识库 `*.sqlite`；层清单由 `layersDir` 扫描各库 `_meta.ruleset` 自动发现，不是配置枚举。
+- `civi6_instance` / `civi6_eval` / `civi6_pace` 接受可选 `layer`；解析顺序：显式 `layer` → `defaultLayer` → 唯一可用层 → 报错并列出候选。
+- `civi6_pace_eval` 从 handle 继承层；`source` 参数已退役。
+- 打开某层时校验 `_meta.build.dataSource`、`_meta.ruleset.id`、`_meta.effects.rawBuiltAt`、`kb.build.rawBuiltAt` 与 BBG 基座时间戳；不一致就拒绝该层（fail closed）。层 id 重复、库缺 `_meta.ruleset`、请求层未知同样显式报错。
+- 缺效果事实层时（`effectCardsRequired: true`）同样拒绝该层，避免退回"靠模型记忆描述效果"。
+- 同一回答只使用一个数值层；跨层对比必须分节并标明层 id。
 
 ### 1.4 回答协议
 
@@ -65,7 +68,7 @@ AgenticCIV6 的核心是一个宿主无关的知识库与查询契约；"怎么�
 3. 基准时间表一律走 `civi6_pace` → `civi6_pace_eval`，不回传 `functionSet`、不手算 `base/Δ`；
 4. 答案固定六段：约束方程 / 供给计划 / 砍单 / 情景 / 路径 / 验收；
 5. 效果只引用 `eff`/`fx`，`unres>0` 且缺 `fx` 时答"数据层未解析"；
-6. 末尾附规则与实体出处。
+6. 末尾附数值层与实体出处（层标签 + 层 id / entity ids）。
 
 ## 2. 接入方式 A：DeepSeek Harness 插件（已实现）
 
@@ -73,8 +76,8 @@ AgenticCIV6 的核心是一个宿主无关的知识库与查询契约；"怎么�
 
 | 文件 | 作用 |
 | --- | --- |
-| `dsh-plugin/index.js` | 插件本体：5 个工具、规则锁定、系统提示段、严格 guard、数据类包组装。零 npm 依赖 |
-| `dsh-plugin/cordis.patch.yml` | 注入配置（`ruleset` + 两个 `dbPaths`） |
+| `dsh-plugin/index.js` | 插件本体：5 个工具、数值层目录/按调用选层、系统提示段、严格 guard、数据类包组装。零 npm 依赖 |
+| `dsh-plugin/cordis.patch.yml` | 注入配置（`layersDir` + 可选 `defaultLayer` + `pacingRoot`） |
 | `dsh-plugin/package.json` | `@local/civi6-kb`；`dsh.bundle.patch` 指向上面的 yml |
 | `dsh-plugin/locale/*.json`、`icon.svg` | 界面文案与图标 |
 | `dist/pacing/` | `npm run pace:build` 的编译产物（gitignored）；`civi6_pace` / `civi6_pace_eval` 懒加载 |
@@ -85,32 +88,44 @@ AgenticCIV6 的核心是一个宿主无关的知识库与查询契约；"怎么�
 
 ```yaml
 config:
-  ruleset: bbg              # 唯一规则：bbg | vanilla（vanilla = 标准规则，含风云际会）
-  lockRuleset: true
+  # 数值层 = 一套已构建知识库（*.sqlite）。插件扫描该目录，逐个读取
+  # _meta.ruleset 自动注册；不在配置里枚举类型，也不写死每个库的路径。
+  layersDir: ../data
+  # 可选：未传 layer 时的默认层（id 或名称，如 bbg / 标准包）。
+  # 省略时：只有一个可用层就用它；多个层并存时必须显式传 layer。
+  # defaultLayer: bbg
   strictGrounding: true     # 拒绝 pwsh/bash 直接读 Civ6 数据库
   effectCardsRequired: true # 缺效果层时 fail closed
-  dbPaths:
-    vanilla: ../data/civi6.sqlite
-    bbg: ../data/civi6-bbg.sqlite
   # pacingRoot: ..          # 仓库根（含 kb/pacing 与 dist/pacing；默认插件上一级，本地安装无需改）
 ```
 
 | 配置 | 说明 |
 | --- | --- |
-| `ruleset` | 当前会话使用的唯一规则；`vanilla` 是标准规则的内部键（含迭起兴衰/风云际会/DLC）。旧字段 `dataSource` 仍兼容 |
-| `lockRuleset` | 声明式锁定：运行期没有按调用切换规则的入口，改规则只能改配置并重载 |
-| `strictGrounding` | 拦截 `pwsh`/`bash` 直读 `data/civi6*.sqlite`，只允许 `civi6_*` 工具取数（5 个，默认开） |
+| `layersDir` | 数值层目录；扫描其中的 `*.sqlite`，逐个读取 `_meta.ruleset` 注册层。相对路径以插件目录为基准（默认 `../data`） |
+| `defaultLayer` | 可选单值默认层（id/名称/别名）；不是类型清单。省略时：单层自动选中，多层则调用必须显式传 `layer` |
+| `strictGrounding` | 拦截 `pwsh`/`bash` 直读任何已发现层的 `*.sqlite`，只允许 `civi6_*` 工具取数（5 个，默认开） |
 | `effectCardsRequired` | 必须有可用的效果事实层，缺失或过期都 fail closed（默认开） |
-| `dbPaths` | 两套库的位置；相对路径以插件目录为基准。旧字段 `dbPath` 仍兼容 |
 | `pacingRoot` | 仓库根（含 `kb/pacing/*.json` 与 `dist/pacing/`）；默认 `workspaceRoot` 或插件上一级。相对路径以插件目录为基准 |
+
+旧键 `ruleset` / `dataSource` / `lockRuleset` / `dbPaths` / `dbPath` 保留一版兼容：`ruleset`/`dataSource` 按 `defaultLayer` 处理，`dbPaths`/`dbPath` 按显式层路径处理，并在 `civi6_meta.warnings` 提示废弃。新配置不需要它们。
+
+**数值层目录契约**：一个可被发现的库必须满足：
+
+- 文件名 `*.sqlite`，位于 `layersDir`（不递归）；
+- `_meta.ruleset.id` 唯一、建议 ASCII，且有 `labelZh`/`labelEn`；
+- `_meta.build.dataSource == _meta.ruleset.id`；
+- `_meta.effects` 与 `_meta['kb.build']` 新鲜；
+- `kb_*` 行的 `source = id`（`civi6_eval` / `civi6_pace` 需要）。
+
+不满足的库会在 `civi6_meta.layers` 显示 `available:false` + `error`，不会被静默使用。新增层：把符合契约的库放进 `layersDir`，重载插件；不改类型配置、不改代码。
 
 ### 2.3 挂载与重载
 
 1. 把 `dsh-plugin/` 作为本地插件装入当前 DSH profile（本地安装，随 profile 生效）；
 2. 在仓库根运行 `npm run pace:build` 生成 `dist/pacing/`（`civi6_pace` 首次调用时懒加载；缺产物会给构建提示）；
-3. 按需在 profile 的插件配置里覆盖 `ruleset` / `dbPaths` / `pacingRoot`；
+3. 按需在 profile 的插件配置里覆盖 `layersDir` / `defaultLayer` / `pacingRoot`；
 4. 重载插件（改配置或改插件代码后都要重载，必要时重启宿主；`src/pacing` 的首次构建可在插件加载后做，已加载过旧产物则需重载以绕过 ESM 缓存）；
-5. 新会话里调用 `civi6_meta`，确认 `ruleset.id` 与 `locked:true`。
+5. 新会话里调用 `civi6_meta`，确认 `layers` 列出预期层（`layerSelection:"per-call"`，`locked:false`）。
 
 ### 2.4 环境变量覆盖
 
@@ -118,13 +133,13 @@ config:
 
 | 变量 | 说明 |
 | --- | --- |
-| `CIVI6_DATA_SOURCE` | 兜底规则（`bbg` / `vanilla`）：只在配置未给 `ruleset` / `dataSource` 时生效 |
-| `CIVI6_DB_PATH` | 覆盖标准库路径（优先级低于 `dbPaths.vanilla`） |
-| `CIVI6_BBG_DB_PATH` | 覆盖 BBG 库路径（优先级低于 `dbPaths.bbg`） |
+| `CIVI6_LAYERS_DIR` | 覆盖 `layersDir`；只在配置未给 `layersDir` 时生效 |
+| `CIVI6_DATA_SOURCE` | 已废弃：按 `defaultLayer` 处理 |
+| `CIVI6_DB_PATH` / `CIVI6_BBG_DB_PATH` | 已废弃为插件层配置；仍被构建/验证脚本使用；插件侧按显式层路径兼容 |
 
 ### 2.5 严格模式
 
-`strictGrounding: true` 时，命令里出现 Civ6 数据库路径会被 guard 拒绝。维护/调试确实需要直读库时，把它设为 `false` 并重载；正常问答不要关闭。构建与验证命令（`npm run build|rebuild|effects:build|reindex|kb:build|verify`）不受影响。
+`strictGrounding: true` 时，命令里出现任何已发现层的 `*.sqlite`（或 `layersDir` 下的 `.sqlite`）会被 guard 拒绝。维护/调试确实需要直读库时，把它设为 `false` 并重载；正常问答不要关闭。构建与验证命令（`npm run build|rebuild|effects:build|reindex|kb:build|verify`）不受影响。
 
 ## 3. 接入方式 B：游戏内 Mod（规划，未实现）
 
@@ -149,17 +164,18 @@ config:
 | `renderToolPayload(kind, value)` | 把查询结果渲染成模型可读的载荷 |
 | `apply(ctx, config)` | DSH 宿主适配器（`ctx` 实现 `tools` / `systemPrompt` 即可） |
 
-`npm run verify:plugin` 本身就通过直接 import `dsh-plugin/index.js` 完成断言，可作为最小接入示例。基准节奏的宿主无关入口在 `src/pacing/api.ts`（`buildPaceFunctionSet`）、`evaluate.ts`（`evaluatePacingFormula`）与 `handle.ts`（`encode/decodePaceHandle`），由 `npm run pace:build` 编译到 `dist/pacing`。要做 MCP / CLI / HTTP 接入，只需实现对应的 I/O 适配与规则锁定，不需要复制查询逻辑。
+`npm run verify:plugin` 本身就通过直接 import `dsh-plugin/index.js` 完成断言，可作为最小接入示例。基准节奏的宿主无关入口在 `src/pacing/api.ts`（`buildPaceFunctionSet`）、`evaluate.ts`（`evaluatePacingFormula`）与 `handle.ts`（`encode/decodePaceHandle`），由 `npm run pace:build` 编译到 `dist/pacing`。要做 MCP / CLI / HTTP 接入，只需实现对应的 I/O 适配与逐层身份校验，不需要复制查询逻辑。
 
-## 5. 切换规则
+## 5. 切换数值层
 
-只能改配置，不能按调用切换：
+按调用选择，不改配置：
 
-1. 编辑插件配置的 `ruleset` 为 `bbg` 或 `vanilla`；
-2. 重新安装/重新加载插件（或改 profile 中该插件的 config 后重载）；
-3. 新会话用 `civi6_meta` 确认 `ruleset.id` 与 `locked:true`。
+1. `civi6_meta()` 读取 `layers`，确认目标层 id（或中文名/别名）；
+2. `civi6_instance({ layer, ... })` / `civi6_eval({ layer, ... })` / `civi6_pace({ layer, ... })` 传同一个层；
+3. `civi6_pace_eval` 用 `civi6_pace` 返回的 handle，层已包含在 handle 里；
+4. 同一回答只用一个层；跨层对比分节，并在每节标题/末行写明层 id。
 
-要对比两套规则，请改配置并重载，或离线运行 `npm run verify:effects` / `npm run kb:verify`；没有"日常对比时直接传 source"这种用法。
+要新增层：把符合目录契约的库放进 `layersDir` 并重载插件，然后在 `civi6_meta.layers` 确认；不需要改 `ruleset`/`dbPaths`。
 
 ## 6. 退役接口
 
@@ -169,10 +185,10 @@ config:
 
 ## 7. 换接入层检查清单
 
-- [ ] 只读打开知识库，规则身份与构建指纹校验失败即拒绝服务
-- [ ] 只暴露 `meta` / `instance` / `eval` / `pace` / `pace_eval` 五个调用，无 SQL、无单实体放大镜、无 `source` 参数
+- [ ] 只读打开知识库，逐层校验规则身份与构建指纹，失败即拒绝该层
+- [ ] 只暴露 `meta` / `instance` / `eval` / `pace` / `pace_eval` 五个调用，无 SQL、无单实体放大镜、无 `source` 参数（`layer` 是唯一层选择）
 - [ ] `instance` 按类交付，单类超限报错而不是截断
-- [ ] `pace` 只接受精确 id，返回 `functionSet + handle`；`pace_eval` 按调用求值，超限报错不截断
+- [ ] `pace` 只接受精确 id + 层，返回携带层的 `functionSet + handle`；`pace_eval` 按 handle 的层求值，超限报错不截断
 - [ ] 成本与回合原样透出 `costBasis` / `basis`，不二次换算
 - [ ] `gaps` / `omitted` 原样透出，缺失项回答"数据层未收录"
 - [ ] 系统提示/工具描述携带同一套回答协议（一次取数、公式算账、六段式、出处）

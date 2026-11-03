@@ -1,5 +1,4 @@
 import type { KnowledgeDb } from "../db.js";
-import type { DataSource } from "../config.js";
 import {
   PACING_DIMENSIONS,
   type Assurance,
@@ -83,7 +82,7 @@ export interface ExcludedReport {
 }
 
 export interface PaceGraph {
-  source: DataSource;
+  source: string;
   speed: SpeedBasis;
   assurance: Assurance;
   nodes: Map<string, PaceNode>;
@@ -104,7 +103,7 @@ export interface PaceGraph {
 }
 
 export interface LoadPacingOptions {
-  source: DataSource;
+  source: string;
   speed: string;
   assurance: Assurance;
   civId: string;
@@ -170,7 +169,7 @@ function loadParams(kb: KnowledgeDb): Record<string, number> {
   return out;
 }
 
-function loadEras(kb: KnowledgeDb, source: DataSource): PaceGraph["eras"] {
+function loadEras(kb: KnowledgeDb, source: string): PaceGraph["eras"] {
   if (kb.hasTable("kb_era_window")) {
     const rows = kb.all<{ era_id: string; era_index: number; turn_lo: number; turn_hi: number }>(
       `SELECT era_id, era_index, turn_lo, turn_hi FROM kb_era_window WHERE source = ? ORDER BY era_index;`,
@@ -435,7 +434,7 @@ function loadStartingUnits(kb: KnowledgeDb, startingEra: string): Array<{ id: st
 
 function loadPlan(
   kb: KnowledgeDb,
-  source: DataSource,
+  source: string,
   victoryId: string,
 ): { burstTurn: number; burstEra: string } | null {
   if (!kb.hasTable("kb_plan")) return null;

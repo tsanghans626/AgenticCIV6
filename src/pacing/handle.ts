@@ -1,4 +1,3 @@
-import type { DataSource } from "../config.js";
 import type { VictoryId } from "../kb/spec.js";
 import type { Assurance } from "./spec.js";
 
@@ -13,7 +12,7 @@ import type { Assurance } from "./spec.js";
  */
 export interface PaceHandleData {
   version: 1;
-  source: DataSource;
+  source: string;
   civ: string;
   leader: string | null;
   speed: string;
@@ -85,7 +84,9 @@ export function decodePaceHandle(handle: string): PaceHandleData {
   if (!parsed || typeof parsed !== "object") handleFail("handle 载荷不是对象。");
   const wire = parsed as Partial<WireHandle>;
   if (wire.v !== 1) handleFail(`handle 版本不支持（${String(wire.v)}）。`);
-  if (wire.s !== "vanilla" && wire.s !== "bbg") handleFail(`handle.source 非法（${String(wire.s)}）。`);
+  if (typeof wire.s !== "string" || !wire.s.trim() || wire.s.length > 64) {
+    handleFail(`handle.source 非法（${String(wire.s)}）。`);
+  }
   if (typeof wire.c !== "string" || !wire.c.startsWith("CIVILIZATION_")) {
     handleFail("handle.civ 非法。");
   }

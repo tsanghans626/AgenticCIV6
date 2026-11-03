@@ -1,5 +1,4 @@
 import type { KnowledgeDb } from "../db.js";
-import type { DataSource } from "../config.js";
 import { loadPaceGraph, nodeKey, resolveId, splitKey, worldEraAt, type Currency, type PaceGraph, type PaceNode } from "./graph.js";
 import { computeRates, type CityRates, type CityView, type EmpireRates } from "./model.js";
 import { citiesAt, loadPacingSpecs, validatePacingSpecs, type PacingDimension, type PacingSpecs, type VictoryPacingSpec } from "./spec.js";
@@ -75,7 +74,7 @@ export interface PacingChecks {
 export interface PacingResult {
   schema: "civi6.pacing/v1";
   input: {
-    source: DataSource;
+    source: string;
     civId: string;
     leaderId: string | null;
     victoryId: VictoryId;
@@ -119,7 +118,7 @@ export interface PacingResult {
   checks: PacingChecks;
   assumptions: Record<string, unknown>;
   provenance: {
-    ruleset: DataSource;
+    ruleset: string;
     kbBuiltAt: string | null;
     rawBuiltAt: string | null;
     specVersion: number;
@@ -130,7 +129,7 @@ export interface PacingResult {
 }
 
 export interface PacingOptions {
-  source: DataSource;
+  source: string;
   civId: string;
   leaderId?: string | null;
   victoryId: VictoryId;

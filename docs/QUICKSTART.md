@@ -104,8 +104,11 @@ CIVI6_SOURCE=bbg npm run pace:verify   # 用 BBG 库再跑一遍
 最小工具链路（插件已加载时）：
 
 ```js
+const meta = await tools.civi6_meta();                 // layers[] / defaultLayer
+const layer = "bbg";                                  // 或任一 civi6_meta.layers[].id
+const inst = await tools.civi6_instance({ layer, civ: "Korea", leader: "Seondeok", speed: "online", section: "core" });
 const pace = await tools.civi6_pace({
-  civ: "CIVILIZATION_KOREA", leader: "LEADER_SEONDEOK", speed: "online", victory: "science",
+  layer, civ: inst.instance.civ, leader: inst.instance.leader, speed: "online", victory: "science",
 });
 await tools.civi6_pace_eval({ handle: pace.handle, calls: [{ fn: "state", t: 120 }] });
 ```

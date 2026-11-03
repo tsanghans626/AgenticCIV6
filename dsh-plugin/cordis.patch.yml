@@ -2,15 +2,14 @@
     - id: civi6-kb
       name: "@local/civi6-kb"
       config:
-        # 唯一规则：bbg（BBG 7.5.1，基于风云际会标准规则）。
-        # 允许值：bbg | vanilla（vanilla 内部键 = 标准规则，含迭起兴衰/风云际会/DLC）。
-        # 运行期没有按调用切换的 source 参数；改规则请改这里并重载插件。
-        ruleset: bbg
-        lockRuleset: true
+        # 数值层 = 一套已构建的知识库（*.sqlite）。插件扫描该目录，逐个读取
+        # _meta.ruleset 自动注册；不在配置里枚举类型，也不写死每个库的路径。
+        # 新增层只需把符合契约的库放进这个目录并重载插件。
+        layersDir: ../data
+        # 可选：未传 layer 时的默认层（id 或名称，如 bbg / 标准包）。
+        # 省略时：只有一个可用层就用它；多个层并存时必须显式传 layer。
+        # defaultLayer: bbg
         # 严格模式：拒绝通过 pwsh/bash 直接读取 Civ6 数据库；只允许 civi6_* 工具。
         strictGrounding: true
         # 缺少效果事实层时拒绝启动，避免退回“靠模型记忆描述效果”。
         effectCardsRequired: true
-        dbPaths:
-          vanilla: ../data/civi6.sqlite
-          bbg: ../data/civi6-bbg.sqlite

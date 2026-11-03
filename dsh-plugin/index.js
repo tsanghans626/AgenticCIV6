@@ -1,6 +1,6 @@
 import { DatabaseSync } from "node:sqlite";
-import { existsSync, statSync } from "node:fs";
-import { dirname, isAbsolute, resolve } from "node:path";
+import { existsSync, readdirSync, statSync } from "node:fs";
+import { basename, dirname, isAbsolute, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 export const name = "civi6-kb";
@@ -9,32 +9,27 @@ export const inject = ["tools", "systemPrompt"];
 /** Directory of this plugin file; relative dbPath values are anchored here. */
 const PLUGIN_DIR = dirname(fileURLToPath(import.meta.url));
 
-/** Internal ruleset keys. `vanilla` means the unmodded standard rules. */
-const SOURCES = ["vanilla", "bbg"];
-const DEFAULT_DB_PATHS = {
-  vanilla: "../data/civi6.sqlite",
-  bbg: "../data/civi6-bbg.sqlite",
-};
-
-/** Accept the canonical config value plus Chinese/aliased forms. */
-function normalizeRuleset(value) {
-  if (value === undefined || value === null || value === "") return undefined;
-  const source = String(value).trim().toLowerCase();
-  if (
-    source === "vanilla" ||
-    source === "standard" ||
-    source === "原版" ||
-    source === "标准" ||
-    source === "base" ||
-    source === "gathering storm" ||
-    source === "gs" ||
-    source === "风云际会"
-  ) {
-    return "vanilla";
-  }
-  if (source === "bbg" || source === "better balanced game") return "bbg";
-  throw new Error(`civi6-kb: unknown ruleset "${value}" (expected "vanilla" or "bbg")`);
-}
+/**
+ * A numerical layer is one built knowledge-base database. The list is discovered
+ * from each file's `_meta.ruleset`; it is deliberately NOT a config enum.
+ * `vanilla`/`bbg` remain the only built-in aliases because they are the two
+ * sources the shipped build pipeline produces.
+ */
+const LAYER_ALIASES = new Map([
+  ["vanilla", ["vanilla"]],
+  ["standard", ["vanilla"]],
+  ["base", ["vanilla"]],
+  ["原版", ["vanilla"]],
+  ["标准", ["vanilla"]],
+  ["标准包", ["vanilla"]],
+  ["标准库", ["vanilla"]],
+  ["标准规则", ["vanilla"]],
+  ["风云际会", ["vanilla"]],
+  ["gathering storm", ["vanilla"]],
+  ["gs", ["vanilla"]],
+  ["bbg", ["bbg"]],
+  ["better balanced game", ["bbg"]],
+]);
 
 /**
  * Hard cap on the JSON a single tool call returns to the model.
@@ -2641,7 +2636,12 @@ export function createKnowledgeBase(dbPath, sourceName = "vanilla") {
       build: opts.verbose ? build : slimBuild(build),
       dbFile: dbPath,
       dataSource: sourceName,
-      locked: true,
+      // The database itself is not locked to one layer any more: every
+      // DB-reading tool takes an explicit `layer`. `locked` is kept as a
+      // deprecated echo of the old single-ruleset contract.
+      locked: false,
+      readOnly: true,
+      layerSelection: "per-call",
       tableCount: tables.length || ctx.tables.size,
       searchDocs: stats?.searchDocs ?? indexMeta(ctx).docs ?? 0,
       searchIndex: postingsAvailable(ctx) ? "precomputed" : "in-memory",
@@ -3311,21 +3311,42 @@ export function renderToolPayload(kind, value) {
   return fitPayload(value, config);
 }
 
-function metaTool(getKb) {
+function metaTool(getKb, getCatalog) {
   return makeTool({
     name: "civi6_meta",
     description:
-      "Active Civilization VI ruleset, build provenance, effect/formula coverage, and speedProfiles (total turns and cost multiplier per speed). Cheap; call once per session. The inventory of data classes and their sizes lives in `civi6_instance` → core.manifest, not here. Pass verbose:true only when you also need the full table list, the entity-type inventory and the build load order.",
+      "Available numerical layers and their provenance (id, label, dbFile, builtAt, default, available), plus the selected layer's build provenance, effect/formula coverage, and speedProfiles (total turns and cost multiplier per speed). Cheap; call once per session. Pass `layer` for a specific layer's full meta; omit it to get the catalog (and the default layer's meta when a defaultLayer is configured or exactly one layer exists). The inventory of data classes and their sizes lives in `civi6_instance` → core.manifest, not here. Pass verbose:true only when you also need the full table list, the entity-type inventory and the build load order.",
     parameters: {
       type: "object",
       properties: {
+        layer: {
+          type: "string",
+          description: "Optional numerical layer id/name (e.g. vanilla/标准包, bbg). Omit for the catalog/default layer.",
+        },
         verbose: { type: "boolean", description: "Include the full table list with row counts." },
       },
       required: [],
     },
     execute: (args) => {
       assertNoSource(args);
-      return getKb().meta({ verbose: args.verbose === true });
+      const catalog = getCatalog();
+      const layers = catalogPayload(catalog);
+      let selected = null;
+      if (args?.layer !== undefined && args.layer !== null && args.layer !== "") {
+        selected = resolveLayerForTool(catalog, "civi6_meta", args.layer);
+      } else if (catalog.defaultId) {
+        selected = catalog.byId.get(catalog.defaultId) ?? null;
+      }
+      const envelope = {
+        layers,
+        defaultLayer: catalog.defaultId ?? null,
+        layerSelection: "per-call",
+        locked: false,
+        readOnly: true,
+        ...(catalog.warnings.length ? { warnings: catalog.warnings } : {}),
+      };
+      if (!selected) return envelope;
+      return { ...getKb(selected).meta({ verbose: args?.verbose === true }), ...envelope };
     },
   });
 }
@@ -3703,7 +3724,7 @@ function roundCost(value) {
   return Math.round(Number(value) * 100) / 100;
 }
 
-function buildInstanceData(ctx, args) {
+function buildInstanceData(ctx, args, layer = null) {
   if (!hasTable(ctx, "kb_formula") || !hasTable(ctx, "kb_formula_owner")) {
     throw new Error(
       "civi6_instance: 公式层缺失。请在插件卸载状态下运行 `npm run effects:build:bbg`（或 effects:build）重建效果事实层。",
@@ -3713,8 +3734,19 @@ function buildInstanceData(ctx, args) {
   const effectsMeta = parseJson(q1(ctx, "SELECT value FROM _meta WHERE key = 'effects';")?.value, {}) ?? {};
   const rulesetMeta = parseJson(q1(ctx, "SELECT value FROM _meta WHERE key = 'ruleset';")?.value, {}) ?? {};
   // `_meta.build.source` is the game install path; the ruleset id is the key the
-  // derived tables are keyed by, so resolve the civ board against that.
-  const source = rulesetMeta.id ?? effectsMeta.rulesetId ?? "bbg";
+  // derived tables are keyed by, so resolve the civ board against that. When a
+  // layer was resolved by the plugin it is authoritative; the facade fallback
+  // keeps `createKnowledgeBase(...).instance()` working for QA/tests.
+  const source = layer?.id ?? rulesetMeta.id ?? effectsMeta.rulesetId ?? "bbg";
+  const layerInfo = layer
+    ? layerEcho(layer)
+    : {
+        id: source,
+        labelZh: rulesetMeta.labelZh ?? source,
+        labelEn: rulesetMeta.labelEn ?? source,
+        dbFile: null,
+        builtAt: build.builtAt ?? rulesetMeta.builtAt ?? null,
+      };
   const speed = args.speed === "online" ? "online" : "standard";
   // Every cost this packet ships is in the instance's speed units (see
   // `instance.costBasis`); raw base costs stay in the database.
@@ -4339,6 +4371,9 @@ function buildInstanceData(ctx, args) {
   return {
     meta: {
       ruleset: source,
+      // The layer is the database selector; every page echoes it so an answer
+      // can never lose track of which numerical layer it came from.
+      layer: layerInfo,
       builtAt: build.builtAt ?? effectsMeta.builtAt ?? null,
       packetVersion: 3,
       encoding: {
@@ -4376,6 +4411,7 @@ function buildInstanceData(ctx, args) {
       formulaCoverage: effectsMeta.formulaCoverage ?? null,
     },
     instance: {
+      layer: source,
       civ: civRow?.civ_id ?? null,
       leader: civRow?.leader_id ?? null,
       speed,
@@ -4435,6 +4471,7 @@ function assembleInstanceSection(data, section) {
   const coreEntry = INSTANCE_CLASS_BY_SECTION.get("core");
   pages.core = {
     section: "core",
+    layer: data.meta.layer,
     definition: coreEntry.definition,
     whenToUse: coreEntry.whenToUse,
     meta: data.meta,
@@ -4464,6 +4501,7 @@ function assembleInstanceSection(data, section) {
     }
     pages[name] = {
       section: name,
+      layer: data.meta.layer,
       definition: classEntry.definition,
       whenToUse: classEntry.whenToUse,
       content,
@@ -4485,7 +4523,7 @@ function assembleInstanceSection(data, section) {
     rows: data.integrity.rows,
     note:
       "先取 core，再按各类 whenToUse 只取问题涉及的 2~5 类，不要一次全取；全量包比按需取更贵。" +
-      "换胜利线不重取，换文明/领袖/速度才重取。",
+      "换胜利线不重取，换数值层/文明/领袖/速度才重取。",
   });
   // core carries the manifest, so its own byte count is only correct after the
   // manifest exists; a second pass settles the digits.
@@ -4512,25 +4550,58 @@ function assembleInstanceSection(data, section) {
   return picked;
 }
 
-let INSTANCE_CACHE = null;
+/**
+ * Instance packets are expensive (one full DB pass) and a cross-layer
+ * comparison alternates two layers with the same civ/speed. The cache is
+ * therefore keyed by layer + build + instance constraints and bounded; a
+ * miss never reuses another layer's data.
+ */
+const INSTANCE_CACHE_LIMIT = 3;
+const INSTANCE_CACHE = new Map();
 
-function buildInstanceSection(ctx, args, section) {
-  const builtAt = q1(ctx, "SELECT value FROM _meta WHERE key = 'build';")?.value ?? "";
-  const key = `${builtAt}|${args.civ ?? ""}|${args.leader ?? ""}|${args.speed ?? ""}|${args.difficulty ?? ""}`;
-  if (!INSTANCE_CACHE || INSTANCE_CACHE.key !== key) {
-    INSTANCE_CACHE = { key, data: buildInstanceData(ctx, args) };
-  }
-  return assembleInstanceSection(INSTANCE_CACHE.data, section);
+function instanceCacheKey(layer, builtAt, args) {
+  return [
+    layer?.id ?? "_",
+    layer?.dbFile ?? "",
+    layer?.builtAt ?? builtAt ?? "",
+    args.civ ?? "",
+    args.leader ?? "",
+    args.speed ?? "",
+    args.difficulty ?? "",
+  ].join("|");
 }
 
-function instanceTool(getKb) {
+function buildInstanceSection(ctx, args, section, layer = null) {
+  const builtAt = q1(ctx, "SELECT value FROM _meta WHERE key = 'build';")?.value ?? "";
+  const key = instanceCacheKey(layer, builtAt, args);
+  let data = INSTANCE_CACHE.get(key);
+  if (data) {
+    // LRU: re-insert on hit.
+    INSTANCE_CACHE.delete(key);
+    INSTANCE_CACHE.set(key, data);
+  } else {
+    data = buildInstanceData(ctx, args, layer);
+    INSTANCE_CACHE.set(key, data);
+    while (INSTANCE_CACHE.size > INSTANCE_CACHE_LIMIT) {
+      INSTANCE_CACHE.delete(INSTANCE_CACHE.keys().next().value);
+    }
+  }
+  return assembleInstanceSection(data, section);
+}
+
+function instanceTool(getKb, getCatalog) {
   return makeTool({
     name: "civi6_instance",
     description:
-      "Objective-free instance packet, one data class per call. Fetch section='core' first: it carries the hard constraints (civ/leader/speed/difficulty), the civ kit full text, the neutral indexes, city-states, global parameters, and manifest.classes with each class's whenToUse/rows/bytes. Every `cost` in this packet is already in this instance's speed units — `instance.costBasis` echoes the multiplier and the source; do not multiply by the speed percentage again. Then fetch ONLY the 2-5 classes the question touches (tech-tree, civic-tree, units, districts, buildings, tiles, multipliers, beliefs, promotions, governors) — do not fetch all of them. Every class returns definition (what the class is and what it does NOT contain) and whenToUse (when to ask for it) as separate fields. Every row is already join'd: [h, id, name, era, cost, fx, unres, ...content[kind].columns from index 7]; eff is the authoritative official text, fx the parsed formula summary, unres the count of unparsed mechanism rows (when >0 answer '数据层未解析' and do not fill in). Read `columns`/`legend`, never guess a position. There is no SQL tool and no per-entity drill-down tool: this packet plus civi6_eval, civi6_meta, civi6_pace and civi6_pace_eval is the whole data surface. The baseline timeline is NOT in this packet: after core, call civi6_pace once with the exact instance ids (civ/leader/speed) + victory, then evaluate turns with civi6_pace_eval. Changing victory line does NOT require a re-fetch; changing civ/leader/speed does. A class that would exceed its budget fails loudly instead of being truncated.",
+      "Objective-free instance packet, one data class per call. Pass `layer` to choose which numerical layer/database to read (available values are in civi6_meta.layers; omit only when a defaultLayer is configured or exactly one layer exists). Fetch section='core' first: it carries the hard constraints (layer/civ/leader/speed/difficulty), the civ kit full text, the neutral indexes, city-states, global parameters, and manifest.classes with each class's whenToUse/rows/bytes. Every `cost` in this packet is already in this instance's speed units — `instance.costBasis` echoes the multiplier and the source; do not multiply by the speed percentage again. Then fetch ONLY the 2-5 classes the question touches (tech-tree, civic-tree, units, districts, buildings, tiles, multipliers, beliefs, promotions, governors) — do not fetch all of them. Every class returns definition (what the class is and what it does NOT contain) and whenToUse (when to ask for it) as separate fields. Every row is already join'd: [h, id, name, era, cost, fx, unres, ...content[kind].columns from index 7]; eff is the authoritative official text, fx the parsed formula summary, unres the count of unparsed mechanism rows (when >0 answer '数据层未解析' and do not fill in). Read `columns`/`legend`, never guess a position. There is no SQL tool and no per-entity drill-down tool: this packet plus civi6_eval, civi6_meta, civi6_pace and civi6_pace_eval is the whole data surface. The baseline timeline is NOT in this packet: after core, call civi6_pace once with the exact instance ids (layer/civ/leader/speed) + victory, then evaluate turns with civi6_pace_eval. Changing victory line does NOT require a re-fetch; changing layer/civ/leader/speed does. A class that would exceed its budget fails loudly instead of being truncated.",
     parameters: {
       type: "object",
       properties: {
+        layer: {
+          type: "string",
+          description:
+            "Numerical layer/database id or name (e.g. vanilla/标准包, bbg). Available layers are in civi6_meta.layers. A raw file path is not accepted.",
+        },
         civ: { type: "string", description: "Civilization id or Chinese/English name (e.g. Russia / 俄罗斯)." },
         leader: { type: "string", description: "Leader id or name (optional)." },
         speed: { type: "string", enum: ["standard", "online"], description: "Game speed (hard constraint). Default standard." },
@@ -4547,7 +4618,8 @@ function instanceTool(getKb) {
     budget: INSTANCE_SECTION_BUDGET,
     execute: (args) => {
       assertNoSource(args);
-      return buildInstanceSection(getKb().ctx, args ?? {}, String(args?.section ?? "core"));
+      const layer = resolveLayerForTool(getCatalog(), "civi6_instance", args?.layer);
+      return buildInstanceSection(getKb(layer).ctx, args ?? {}, String(args?.section ?? "core"), layer);
     },
   });
 }
@@ -4738,7 +4810,7 @@ function eraDeadline(ctx, source, eraId, eraIndex) {
  * Returns per-dimension totals plus the composition (who contributes what), so
  * the answer can cite arithmetic instead of doing it in prose.
  */
-function buildEvalResult(ctx, args) {
+function buildEvalResult(ctx, args, layer = null) {
   if (!hasTable(ctx, "kb_formula") || !hasTable(ctx, "kb_formula_owner")) {
     throw new Error("civi6_eval: 公式层缺失。请先运行 `npm run effects:build:bbg` 重建效果事实层。");
   }
@@ -4814,7 +4886,9 @@ function buildEvalResult(ctx, args) {
   }
 
   const ruleset = parseJson(q1(ctx, "SELECT value FROM _meta WHERE key = 'ruleset';")?.value, {}) ?? {};
-  const source = ruleset.id ?? "bbg";
+  // The requested layer is authoritative when present; the ruleset fallback
+  // keeps the internal QA facade (`kb.eval()`) working without a catalog.
+  const source = layer?.id ?? ruleset.id ?? "bbg";
   const supplyByDim = new Map(metrics.map((m) => [m.dimension, m.supply]));
 
   let demand = [];
@@ -4955,6 +5029,7 @@ function buildEvalResult(ctx, args) {
   }
 
   return {
+    layer: source,
     assumptions: {
       speed: basis.speed,
       eraId: args.eraId ?? null,
@@ -4990,14 +5065,19 @@ function buildEvalResult(ctx, args) {
   };
 }
 
-function evalTool(getKb) {
+function evalTool(getKb, getCatalog) {
   return makeTool({
     name: "civi6_eval",
     description:
-      "Deterministic scratchpad over the formula layer. Supply side: a candidate build set + city/pop/era assumptions -> per-dimension supply with the top contributors. Required side: a gate set (techs/civics/buildings/units/projects) -> prerequisite closure, per-currency ledger (required vs supply per turn, gap, verdict), ranked cut list with slipTurns, and low/base/high scenarios. Every cost it returns is already expressed in `speed` units (costMultiplier applied) and every deadline in `speed` turns (turnScale applied); `basis` echoes what was applied, supply is speed-invariant. Pass eraId whenever you pass gates — there is no default era. Fetches no data. Call it instead of doing arithmetic in prose. This is a candidate-set ledger, NOT the baseline timeline: use civi6_pace for the baseline function set and civi6_pace_eval for per-turn values.",
+      "Deterministic scratchpad over the formula layer. Pass `layer` to compute against the same numerical layer/database the instance came from (available values in civi6_meta.layers); omitting it uses defaultLayer or the single available layer. Supply side: a candidate build set + city/pop/era assumptions -> per-dimension supply with the top contributors. Required side: a gate set (techs/civics/buildings/units/projects) -> prerequisite closure, per-currency ledger (required vs supply per turn, gap, verdict), ranked cut list with slipTurns, and low/base/high scenarios. Every cost it returns is already expressed in `speed` units (costMultiplier applied) and every deadline in `speed` turns (turnScale applied); `basis` echoes what was applied, supply is speed-invariant. Pass eraId whenever you pass gates — there is no default era. Call it instead of doing arithmetic in prose. This is a candidate-set ledger, NOT the baseline timeline: use civi6_pace for the baseline function set and civi6_pace_eval for per-turn values.",
     parameters: {
       type: "object",
       properties: {
+        layer: {
+          type: "string",
+          description:
+            "Numerical layer/database id or name, matching the instance layer (e.g. vanilla/标准包, bbg). Omit only when a defaultLayer is configured or exactly one layer exists.",
+        },
         builds: {
           type: "array",
           items: { type: "string" },
@@ -5033,7 +5113,8 @@ function evalTool(getKb) {
     },
     execute: (args) => {
       assertNoSource(args);
-      return buildEvalResult(getKb().ctx, args ?? {});
+      const layer = resolveLayerForTool(getCatalog(), "civi6_eval", args?.layer);
+      return buildEvalResult(getKb(layer).ctx, args ?? {}, layer);
     },
   });
 }
@@ -5191,14 +5272,19 @@ function assertPaceRequest(input) {
   }
 }
 
-function paceTool(getKb, paceContext) {
+function paceTool(getKb, getCatalog, paceContext) {
   return makeTool({
     name: "civi6_pace",
     description:
-      "Build the baseline function set for one exact instance × one victory line. Inputs are exact ids from civi6_instance — names, format and output paths are user-facing CLI conveniences and are rejected here. Returns civi6.pacing/formula/v1 (T, base/Δrate, city/pop steps, ids/labels, actions, milestones, and meta.baseline/checks/assumptions/provenance) plus a handle. feasible:false + meta.baseline.blockers is a result, not an error. T is the function horizon (self-side burst); meta.baseline.turn is the victory turn and may be later (science adds flight turns). Costs/slack are already in this instance's speed units — do not multiply by the speed again. Do NOT hand-compute the hinges: pass the handle to civi6_pace_eval. Changing victory needs a new pace call; changing civ/leader/speed needs a new instance first.",
+      "Build the baseline function set for one exact instance × one victory line × one numerical layer. Pass `layer` to choose the database (available values in civi6_meta.layers); omitting it uses defaultLayer or the single available layer. Inputs are exact ids from civi6_instance — names, format and output paths are user-facing CLI conveniences and are rejected here. Returns civi6.pacing/formula/v1 (T, base/Δrate, city/pop steps, ids/labels, actions, milestones, and meta.baseline/checks/assumptions/provenance) plus a handle that carries the layer. feasible:false + meta.baseline.blockers is a result, not an error. T is the function horizon (self-side burst); meta.baseline.turn is the victory turn and may be later (science adds flight turns). Costs/slack are already in this instance's speed units — do not multiply by the speed again. Do NOT hand-compute the hinges: pass the handle to civi6_pace_eval. Changing victory needs a new pace call; changing layer/civ/leader/speed needs a new instance first.",
     parameters: {
       type: "object",
       properties: {
+        layer: {
+          type: "string",
+          description:
+            "Numerical layer/database id or name, matching the instance layer (e.g. vanilla/标准包, bbg). The handle carries it; civi6_pace_eval needs no layer argument.",
+        },
         civ: {
           type: "string",
           description:
@@ -5247,7 +5333,8 @@ function paceTool(getKb, paceContext) {
       assertNoSource(args);
       const input = args ?? {};
       assertPaceRequest(input);
-      const kb = getKb();
+      const layer = resolveLayerForTool(getCatalog(), "civi6_pace", input.layer);
+      const kb = getKb(layer);
       const ctx = kb.ctx;
       assertPaceTables(ctx);
       assertPaceRoot(paceContext.root);
@@ -5255,7 +5342,7 @@ function paceTool(getKb, paceContext) {
       let formula;
       try {
         formula = runtime.buildPaceFunctionSet(pacingKbAdapter(ctx), {
-          source: paceContext.source,
+          source: layer.id,
           civ: input.civ,
           leader: input.leader ?? null,
           speed: input.speed,
@@ -5295,12 +5382,13 @@ function paceTool(getKb, paceContext) {
       }
       const payload = {
         schema: "civi6.pacing/tool/v1",
+        layer: layer.id,
         handle,
         ...(input.formula === false ? { summary: formula.meta } : { functionSet: formula }),
         ...(warnings.length ? { warnings } : {}),
         note:
           "T 是函数域（我方 burst）；meta.baseline.turn 是胜利回合，可能更晚。求值请用 civi6_pace_eval + handle，" +
-          "不要把 functionSet 原样回传；换胜利线重新调用 civi6_pace，换文明/速度先重取 instance。",
+          "不要把 functionSet 原样回传；换胜利线重新调用 civi6_pace，换数值层/文明/速度先重取 instance。",
       };
       const chars = JSON.stringify(payload).length;
       if (chars > TOOL_BUDGETS.pace) {
@@ -5315,17 +5403,14 @@ function paceTool(getKb, paceContext) {
   });
 }
 
-function verifyPaceHandle(ctx, data, activeSource) {
-  if (data.source !== activeSource) {
-    throw new Error(
-      `civi6_pace_eval: handle 的规则是 "${data.source}"，当前插件锁定 "${activeSource}"；请按当前规则重新调用 civi6_pace。`,
-    );
-  }
+function verifyPaceHandle(ctx, data) {
+  // The handle carries the layer; never compare it to a session-wide default.
+  // Staleness is checked against the database the handle points at.
   const currentRaw = metaBuiltAt(ctx, "build");
   const currentKb = metaBuiltAt(ctx, "kb.build");
   if (data.rawBuiltAt !== currentRaw || data.kbBuiltAt !== currentKb) {
     throw new Error(
-      `civi6_pace_eval: handle 与当前知识库构建不一致（handle raw=${data.rawBuiltAt ?? "null"} / kb=${data.kbBuiltAt ?? "null"}；` +
+      `civi6_pace_eval: handle 与数值层 "${data.source}" 的当前构建不一致（handle raw=${data.rawBuiltAt ?? "null"} / kb=${data.kbBuiltAt ?? "null"}；` +
         `当前 raw=${currentRaw ?? "null"} / kb=${currentKb ?? "null"}）。知识库已重建，请重新调用 civi6_pace。`,
     );
   }
@@ -5390,8 +5475,10 @@ function paceEvalTool(getKb, paceContext) {
         sourceKind = "functionSet";
       } else if (typeof input.handle === "string" && input.handle) {
         const data = runtime.decodePaceHandle(input.handle);
-        const ctx = getKb().ctx;
-        verifyPaceHandle(ctx, data, paceContext.source);
+        // The handle is the layer selector here: open the database it names,
+        // not a session-wide default.
+        const ctx = getKb(data.source).ctx;
+        verifyPaceHandle(ctx, data);
         const cached = paceCacheGet(input.handle);
         if (cached) {
           formula = cached;
@@ -5438,6 +5525,7 @@ function paceEvalTool(getKb, paceContext) {
       const payload = {
         schema: "civi6.pacing/eval/v1",
         T: formula.T,
+        layer: formula.meta?.provenance?.ruleset ?? null,
         source: sourceKind,
         ...(handleUsed ? { handle: handleUsed } : {}),
         results,
@@ -5747,11 +5835,11 @@ function resolveDbPath(configured, workspaceRoot) {
   return resolve(configured);
 }
 
-/** The ruleset is a configuration fact; reject stale per-call source args. */
+/** `source` is retired; the layer is the one explicit selector now. */
 function assertNoSource(args) {
   if (args && typeof args === "object" && Object.prototype.hasOwnProperty.call(args, "source")) {
     throw new Error(
-      "civi6-kb: ruleset is locked by plugin config. Change `ruleset` and reload; per-call source switching is not allowed.",
+      "civi6-kb: 旧参数 `source` 已退役；用 `layer` 选择数值层（可用值见 civi6_meta.layers）。",
     );
   }
 }
@@ -5769,9 +5857,15 @@ function readMetaSummary(file) {
         return null;
       }
     };
-    return { ruleset: read("ruleset"), build: read("build"), kb: read("kb.build"), effects: read("effects") };
-  } catch {
-    return { ruleset: null, build: null, kb: null, effects: null };
+    return { ruleset: read("ruleset"), build: read("build"), kb: read("kb.build"), effects: read("effects"), error: null };
+  } catch (error) {
+    return {
+      ruleset: null,
+      build: null,
+      kb: null,
+      effects: null,
+      error: error instanceof Error ? error.message : String(error),
+    };
   } finally {
     try {
       db?.close();
@@ -5781,36 +5875,351 @@ function readMetaSummary(file) {
   }
 }
 
+/** Resolve a configured directory without requiring it to exist yet. */
+function resolveConfiguredPath(configured, workspaceRoot) {
+  if (!configured) return undefined;
+  if (isAbsolute(configured)) return configured;
+  if (workspaceRoot) return resolve(workspaceRoot, configured);
+  return resolve(PLUGIN_DIR, configured);
+}
+
+/** Normalize a layer selector for id/label/alias matching. */
+function normalizeLayerKey(value) {
+  return String(value ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, " ");
+}
+
+function layerKeys(entry) {
+  const keys = [
+    entry.id,
+    entry.labelZh,
+    entry.labelEn,
+    basename(entry.dbFile),
+    basename(entry.dbFile).replace(/\.sqlite$/i, ""),
+    ...(Array.isArray(entry.aliases) ? entry.aliases : []),
+  ];
+  return [...new Set(keys.map(normalizeLayerKey).filter(Boolean))];
+}
+
+/** Read one candidate DB; a missing `_meta.ruleset` makes it invalid, not fatal. */
+function readLayerFile(file, aliases = [], effectCardsRequired = true) {
+  const summary = readMetaSummary(file);
+  const ruleset = summary.ruleset;
+  const id = typeof ruleset?.id === "string" && ruleset.id.trim() ? ruleset.id.trim() : null;
+  const fallback = basename(file).replace(/\.sqlite$/i, "");
+  const buildBuiltAt = summary.build?.builtAt ?? null;
+  let error = summary.error ?? (id ? null : "缺少 _meta.ruleset.id");
+  if (!error && effectCardsRequired && !summary.effects) {
+    error = "缺少 _meta.effects（效果事实层）";
+  }
+  if (!error && effectCardsRequired && summary.effects?.rawBuiltAt && buildBuiltAt) {
+    if (summary.effects.rawBuiltAt !== buildBuiltAt) error = "效果层过期（effects.rawBuiltAt != build.builtAt）";
+  }
+  if (!error && summary.kb?.rawBuiltAt && buildBuiltAt) {
+    if (summary.kb.rawBuiltAt !== buildBuiltAt) error = "决策层过期（kb rawBuiltAt != build.builtAt）";
+  }
+  return {
+    id,
+    labelZh: ruleset?.labelZh ?? id ?? fallback,
+    labelEn: ruleset?.labelEn ?? id ?? fallback,
+    dbFile: file,
+    builtAt: buildBuiltAt ?? ruleset?.builtAt ?? null,
+    available: !!id && !error,
+    error,
+    ruleset,
+    build: summary.build,
+    kb: summary.kb,
+    effects: summary.effects,
+    aliases: aliases.filter(Boolean),
+  };
+}
+
+/** Human-readable layer list for errors and prompts. */
+function layerListText(catalog) {
+  const available = [...catalog.byId.values()].sort((a, b) => String(a.id).localeCompare(String(b.id)));
+  if (available.length) return available.map((e) => `${e.id}（${e.labelZh ?? e.id}）`).join(" / ");
+  const invalid = catalog.entries.filter((e) => !e.available);
+  if (invalid.length) {
+    return `无可用层（无效库：${invalid.map((e) => `${e.dbFile}（${e.error}）`).join("；")}）`;
+  }
+  return `无可用层（${catalog.dir} 中没有 *.sqlite）`;
+}
+
+function layerEcho(entry) {
+  if (!entry) return null;
+  return {
+    id: entry.id,
+    labelZh: entry.labelZh ?? entry.id,
+    labelEn: entry.labelEn ?? entry.id,
+    dbFile: entry.dbFile ?? null,
+    builtAt: entry.builtAt ?? null,
+  };
+}
+
+/** Model-facing catalog; internal rule/build objects stay out of the payload. */
+function catalogPayload(catalog) {
+  return catalog.entries
+    .slice()
+    .sort((a, b) => String(a.id ?? a.dbFile).localeCompare(String(b.id ?? b.dbFile)))
+    .map((entry) => ({
+      id: entry.id,
+      labelZh: entry.labelZh,
+      labelEn: entry.labelEn,
+      dbFile: entry.dbFile,
+      builtAt: entry.builtAt,
+      available: entry.available,
+      default: entry.id !== null && entry.id === catalog.defaultId,
+      ...(entry.error ? { error: entry.error } : {}),
+      ...(entry.ruleset?.mods?.length ? { mods: entry.ruleset.mods } : {}),
+      ...(entry.ruleset?.excludedOptionalMods?.length
+        ? { excludedOptionalMods: entry.ruleset.excludedOptionalMods }
+        : {}),
+    }));
+}
+
+/**
+ * Discover numerical layers from the database files themselves.
+ *
+ * A layer's identity is `_meta.ruleset.id`, never the filename or a config
+ * enum. Duplicate ids are removed from the selectable map and reported, so a
+ * copy of a database cannot silently shadow the original.
+ */
+function discoverLayers(config, workspaceRoot) {
+  const warnings = [];
+  const configuredDir = config.layersDir ?? process.env.CIVI6_LAYERS_DIR ?? "../data";
+  const dir = resolveConfiguredPath(String(configuredDir), workspaceRoot) ?? resolve(PLUGIN_DIR, "../data");
+
+  if (config.lockRuleset !== undefined) {
+    warnings.push("配置 lockRuleset 已退役；数值层改为每次调用用 layer 选择。");
+  }
+  if (config.ruleset !== undefined || config.dataSource !== undefined) {
+    warnings.push("配置 ruleset/dataSource 已退役；按 defaultLayer 处理。");
+  }
+  if (config.dbPaths !== undefined || config.dbPath !== undefined) {
+    warnings.push("配置 dbPaths/dbPath 已退役；按显式层路径处理（新配置只需 layersDir）。");
+  }
+
+  const files = [];
+  let dirIsDirectory = false;
+  try {
+    dirIsDirectory = statSync(dir).isDirectory();
+  } catch {
+    dirIsDirectory = false;
+  }
+  if (dirIsDirectory) {
+    try {
+      for (const name of readdirSync(dir)) {
+        if (!/\.sqlite$/i.test(name)) continue;
+        if (/-(wal|shm|journal)$/i.test(name)) continue;
+        files.push(resolve(dir, name));
+      }
+    } catch (error) {
+      warnings.push(`layersDir 无法读取：${dir}（${error instanceof Error ? error.message : String(error)}）`);
+    }
+  } else {
+    warnings.push(`layersDir 不存在或不是目录：${dir}`);
+  }
+
+  // Legacy config/env paths are merged as explicit layer files. This keeps old
+  // profiles working for one release without putting a type list back into the
+  // shipped config.
+  const explicit = [];
+  if (config.dbPaths && typeof config.dbPaths === "object") {
+    for (const [key, value] of Object.entries(config.dbPaths)) {
+      if (!value) continue;
+      const file = resolveDbPath(String(value), workspaceRoot);
+      if (file) explicit.push({ file, alias: key });
+    }
+  }
+  if (config.dbPath) {
+    const file = resolveDbPath(String(config.dbPath), workspaceRoot);
+    if (file) explicit.push({ file, alias: config.ruleset ?? config.dataSource ?? "default" });
+  }
+  if (process.env.CIVI6_DB_PATH) {
+    const file = resolveDbPath(process.env.CIVI6_DB_PATH, workspaceRoot);
+    if (file) explicit.push({ file, alias: "vanilla" });
+  }
+  if (process.env.CIVI6_BBG_DB_PATH) {
+    const file = resolveDbPath(process.env.CIVI6_BBG_DB_PATH, workspaceRoot);
+    if (file) explicit.push({ file, alias: "bbg" });
+  }
+
+  const aliasesByFile = new Map();
+  for (const item of explicit) {
+    const list = aliasesByFile.get(item.file) ?? [];
+    list.push(item.alias);
+    aliasesByFile.set(item.file, list);
+  }
+  const allFiles = [...new Set([...files, ...aliasesByFile.keys()])];
+  const effectCardsRequired = config.effectCardsRequired !== false;
+  const entries = allFiles.map((file) => readLayerFile(file, aliasesByFile.get(file) ?? [], effectCardsRequired));
+
+  const byId = new Map();
+  const byKey = new Map();
+  const conflicts = new Map();
+  for (const entry of entries) {
+    if (!entry.available) continue;
+    const existingConflict = conflicts.get(entry.id);
+    if (existingConflict) {
+      existingConflict.push(entry);
+      entry.available = false;
+      entry.error = `数值层 id 重复：${existingConflict.map((e) => e.dbFile).join(" / ")}`;
+      continue;
+    }
+    const key = normalizeLayerKey(entry.id);
+    const previous = byId.get(entry.id) ?? byKey.get(key);
+    if (previous && previous !== entry) {
+      const list = conflicts.get(entry.id) ?? [previous];
+      list.push(entry);
+      conflicts.set(entry.id, list);
+      const message = `数值层 id 重复：${list.map((e) => e.dbFile).join(" / ")}`;
+      for (const item of list) {
+        item.available = false;
+        item.error = message;
+        byId.delete(item.id);
+        byKey.delete(normalizeLayerKey(item.id));
+      }
+      continue;
+    }
+    byId.set(entry.id, entry);
+    byKey.set(key, entry);
+  }
+
+  const catalog = { dir, entries, byId, byKey, conflicts, defaultId: null, warnings };
+  const requestedDefault =
+    config.defaultLayer ?? config.ruleset ?? config.dataSource ?? process.env.CIVI6_DATA_SOURCE;
+  let defaultInvalid = false;
+  if (requestedDefault !== undefined && requestedDefault !== null && requestedDefault !== "") {
+    try {
+      catalog.defaultId = resolveLayer(catalog, requestedDefault)?.id ?? null;
+    } catch (error) {
+      defaultInvalid = true;
+      warnings.push(`defaultLayer 无效：${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  if (!catalog.defaultId && !defaultInvalid) {
+    const available = [...byId.values()];
+    if (available.length === 1) catalog.defaultId = available[0].id;
+  }
+  return catalog;
+}
+
+/** Resolve one selector against the catalog; ambiguity and duplicates fail. */
+function resolveLayer(catalog, value) {
+  if (value === undefined || value === null || value === "") return null;
+  const key = normalizeLayerKey(value);
+  const exactId = catalog.byKey.get(key);
+  if (exactId) return exactId;
+
+  const labeled = [...catalog.byId.values()].filter((entry) => layerKeys(entry).includes(key));
+  if (labeled.length === 1) return labeled[0];
+  if (labeled.length > 1) {
+    throw new Error(`数值层 "${value}" 有歧义：${labeled.map((e) => e.id).join(" / ")}`);
+  }
+
+  for (const id of LAYER_ALIASES.get(key) ?? []) {
+    const hit = catalog.byId.get(id);
+    if (hit) return hit;
+  }
+
+  const partial = [...catalog.byId.values()].filter((entry) =>
+    layerKeys(entry).some((candidate) => candidate.includes(key)),
+  );
+  if (partial.length === 1) return partial[0];
+  if (partial.length > 1) {
+    throw new Error(`数值层 "${value}" 有歧义：${partial.map((e) => e.id).join(" / ")}`);
+  }
+
+  const conflict = catalog.conflicts.get(key) ?? catalog.conflicts.get(value);
+  if (conflict) {
+    throw new Error(`数值层 "${value}" 重复：${conflict.map((e) => e.dbFile).join(" / ")}`);
+  }
+  const unavailable = catalog.entries.filter((entry) => !entry.available && layerKeys(entry).includes(key));
+  if (unavailable.length) {
+    throw new Error(
+      `数值层 "${value}" 不可用：${unavailable.map((e) => `${e.dbFile}（${e.error}）`).join(" / ")}`,
+    );
+  }
+  throw new Error(`未知数值层 "${value}"；可用：${layerListText(catalog)}`);
+}
+
+/** Resolve a tool argument; omission follows explicit -> default -> single -> error. */
+function resolveLayerForTool(catalog, tool, value) {
+  let entry = null;
+  try {
+    if (value === undefined || value === null || value === "") {
+      if (catalog.defaultId) entry = catalog.byId.get(catalog.defaultId) ?? null;
+      else {
+        const available = [...catalog.byId.values()];
+        if (available.length === 1) entry = available[0];
+      }
+    } else {
+      entry = resolveLayer(catalog, value);
+    }
+  } catch (error) {
+    throw new Error(`${tool}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  if (!entry) {
+    throw new Error(
+      `${tool}: 未指定数值层 layer，且没有可用的默认层。可用：${layerListText(catalog)}。` +
+        "传 layer，或在插件配置 defaultLayer。",
+    );
+  }
+  if (!entry.available) {
+    throw new Error(`${tool}: 数值层 "${entry.id ?? value}" 不可用：${entry.error ?? "未知原因"}。`);
+  }
+  return entry;
+}
+
 function buildReasoningPrompt() {
   return `## Civ6 工作协议（一次取数，公式算账）
 “怎么玩 / 时代规划 / 取舍”类问题，数据只取一次，其余全靠公式与账本。
 
-1. 第 1 步只取 civi6_instance({ civ, leader, speed, difficulty, section:'core' })：它由硬约束决定，含文明套件全文、城邦、中立索引、GlobalParameters 子集，以及 gaps/omitted 两张“这里没有”的清单。然后读 core.manifest.classes 里每一类的 whenToUse 与 bytes，只再取问题真正涉及的 2~5 类（tech-tree / civic-tree / units / districts / buildings / tiles / multipliers / beliefs / promotions / governors），不要一次全取。换胜利线不重取；换文明或速度才重取。
+1. 第 1 步先取 civi6_meta()（无 layer 即可）读 layers 与 defaultLayer；再取 civi6_instance({ layer, civ, leader, speed, difficulty, section:'core' })：layer 选择读哪套数值库（可用值见 civi6_meta.layers，如 vanilla/标准包、bbg），省略时用 defaultLayer 或唯一可用层。它含文明套件全文、城邦、中立索引、GlobalParameters 子集，以及 gaps/omitted 两张“这里没有”的清单。然后读 core.manifest.classes 里每一类的 whenToUse 与 bytes，只再取问题真正涉及的 2~5 类（tech-tree / civic-tree / units / districts / buildings / tiles / multipliers / beliefs / promotions / governors），不要一次全取。换胜利线不重取；换数值层或文明/速度才重取。同一回答只用一个 layer，跨层对比必须分节并标明层 id。
 2. 每类都自带 definition（这一类是什么、不含什么）与 whenToUse（什么时候取），按需读，不要靠猜。行按 content[kind].columns 读，不要按位置猜：官方全文（eff）、已解析公式摘要（fx）、未解析计数（unres）、**成本（cost，已是本实例速度口径，见 instance.costBasis，不要再乘速度）**、解锁科技/市政（tech/civic）、前置（req）、单位战力/移动/维护/晋升类/战略资源/升级与取代（cs/rc/mv/mt/pc/res/up/replaces/replacedBy）、政策槽（slot）、信条类别（cls）、政体等级与槽位数（tier/slots）、晋升等级与列（lvl/col）、科技树位与解锁（treeRow/depth/children/unlocks）、总督归属（gov）、城邦宗主加成（cityStates）。数据面只有 instance / eval / meta / pace / pace_eval，没有 SQL 工具，也没有单实体放大镜工具。
-3. 算账一律调用 civi6_eval，并且 **speed 必传**（与实例一致）、**给 gates 时 eraId 必传**（它决定分母；没有默认时代）。返回的 required / path.totalCost / cut.cost 已按该速度折算，deadline.turn 已按该速度压缩，supply 是不随速度变化的每回合产出；返回的 basis 字段回显了所用的 costMultiplier 与 turnScale。其余：builds 给供给侧、gates 给需求侧（会展开前置闭包并计成本）、ledger（每币种 required / requiredPerTurn / supplyPerTurn / gap / verdict）、cut（砍单与 slipTurns）、scenarios（low/base/high）与 composition（谁贡献了多少，带 fx_id）。想让某单位/建筑进 plan，就把它的 tech/civic 直接喂给 gates。禁止心算，禁止把描述文字当数字。
-4. 需要“基准时间表”（某回合的累计产出/速率/在研在建、里程碑、终局可行性）时：用 civi6_pace 按实例的精确 id 构建一次（civ=instance.instance.civ、leader=instance.instance.leader、speed=instance.instance.speed、victory=...），拿到 functionSet 与 handle；再用 civi6_pace_eval({handle, calls:[{fn,t,...}]}) 求值。不要把 functionSet 原样回传给执行器，也不要心算 base/Δ。T 是函数域（我方 burst），胜利回合看 meta.baseline.turn；t>T 按末值并标 clamped。feasible:false 是结论，引用 meta.baseline.blockers，不得改写成“可达”。pace 的 cost/slack 已按实例速度折算，不要再乘速度。换胜利线重新调用 civi6_pace，不必重取 instance；换文明/速度先重取 instance。
+3. 算账一律调用 civi6_eval，并传与 instance 相同的 layer（**speed 必传**，与实例一致；**给 gates 时 eraId 必传**，它决定分母，没有默认时代）。返回的 required / path.totalCost / cut.cost 已按该速度折算，deadline.turn 已按该速度压缩，supply 是不随速度变化的每回合产出；返回的 basis 字段回显了所用的 costMultiplier 与 turnScale。其余：builds 给供给侧、gates 给需求侧（会展开前置闭包并计成本）、ledger（每币种 required / requiredPerTurn / supplyPerTurn / gap / verdict）、cut（砍单与 slipTurns）、scenarios（low/base/high）与 composition（谁贡献了多少，带 fx_id）。想让某单位/建筑进 plan，就把它的 tech/civic 直接喂给 gates。禁止心算，禁止把描述文字当数字。
+4. 需要“基准时间表”（某回合的累计产出/速率/在研在建、里程碑、终局可行性）时：用 civi6_pace 按实例的精确 id 与同一个 layer 构建一次（layer、civ=instance.instance.civ、leader=instance.instance.leader、speed=instance.instance.speed、victory=...），拿到 functionSet 与携带 layer 的 handle；再用 civi6_pace_eval({handle, calls:[{fn,t,...}]}) 求值（pace_eval 不需要再传 layer，它按 handle 的层打开库）。不要把 functionSet 原样回传给执行器，也不要心算 base/Δ。T 是函数域（我方 burst），胜利回合看 meta.baseline.turn；t>T 按末值并标 clamped。feasible:false 是结论，引用 meta.baseline.blockers，不得改写成“可达”。pace 的 cost/slack 已按实例速度折算，不要再乘速度。换胜利线或换 layer 重新调用 civi6_pace；换文明/速度先重取 instance。
 5. 要某个数值确实不在包里时，先查 core.gaps 与 core.omitted——写在那里的一律回答“数据层未收录”，不得用记忆补；两者都没有就是看漏了行，回去按 columns 找。行内 unres 是“没有真实描述、已从 fx 丢弃的机制行数”：要数值却没有 fx、且 unres>0 时答“数据层未解析”，但不要因此否定同一行的 eff 文本。
-6. 答案固定 6 段：约束方程 / 供给计划 / 砍单 / 情景 / 路径 / 验收；每段引用 civi6_eval / civi6_pace / civi6_pace_eval 字段与行内字段，末行“数据依据：BBG 7.5.1 / <entity ids 或句柄>”。`;
+6. 答案固定 6 段：约束方程 / 供给计划 / 砍单 / 情景 / 路径 / 验收；每段引用 civi6_eval / civi6_pace / civi6_pace_eval 字段与行内字段，末行“数据依据：<层标签>（<层 id>） / <entity ids 或句柄>”。`;
 }
 
-function buildRulesetPrompt(ruleset, build) {
-  if (!ruleset) {
-    return "## Civ6 规则不可用\n当前 Civ6 知识库不可用（缺少数据库/规则清单/效果层）。禁止凭记忆回答文明6事实；请先运行构建并重载插件。";
+function buildLayerPrompt(catalog) {
+  const available = [...catalog.byId.values()].sort((a, b) => String(a.id).localeCompare(String(b.id)));
+  if (!available.length) {
+    return (
+      "## Civ6 数值层不可用\n" +
+      `当前 Civ6 知识库不可用：${catalog.dir} 下没有可用数值层（每个 *.sqlite 需带 _meta.ruleset）。` +
+      "禁止凭记忆回答文明6事实；请先运行构建并把库放进 layersDir，再重载插件。"
+    );
   }
-  const label = ruleset.labelZh ?? ruleset.id;
-  const builtAt = build?.builtAt ?? ruleset.builtAt ?? "unknown";
-  const excluded = Array.isArray(ruleset.excludedOptionalMods) ? ruleset.excludedOptionalMods : [];
-  return `## Civ6 规则锁定
-本会话唯一规则：${label}（${ruleset.id}，构建于 ${builtAt}）。
-- 风云际会（Gathering Storm）是本规则的基础资料片，不是另一个可选数据源；本 KB 没有“无资料片基础版”。
+  const defaultLayer = catalog.defaultId ? catalog.byId.get(catalog.defaultId) : null;
+  const lines = available
+    .map((entry) => `- ${entry.id}：${entry.labelZh ?? entry.id}（构建于 ${entry.builtAt ?? "unknown"}）`)
+    .join("\n");
+  const defaultText = defaultLayer
+    ? `默认层：${defaultLayer.id}（${defaultLayer.labelZh ?? defaultLayer.id}）；省略 layer 时使用它。`
+    : "未配置默认层；多个层并存时，civi6_instance / civi6_eval / civi6_pace 必须显式传 layer。";
+  const excluded = Array.isArray(defaultLayer?.ruleset?.excludedOptionalMods)
+    ? defaultLayer.ruleset.excludedOptionalMods
+    : [];
+  return `## Civ6 数值层
+可用数值层（从各库 _meta.ruleset 自动发现，不在配置里枚举类型）：
+${lines}
+${defaultText}
+- 取数：civi6_instance({ layer, civ, leader, speed, difficulty, section:'core' })；layer 选择读哪套数据库（id、中文名或别名，如 vanilla/标准包、bbg）。
+- 算账/节奏：civi6_eval 与 civi6_pace 接受同一个 layer；civi6_pace_eval 从 handle 继承层，不需要再传 layer。
+- 同一回答只使用一个数值层；跨层对比必须分节并标明层 id。不同层的数值不得相加或混算。
+- 风云际会（Gathering Storm）是当前规则库的基础资料片，不是另一个可选数据源；本 KB 没有“无资料片基础版”。
 - 所有文明6数值、成本、产出、前置、效果描述必须来自本轮 civi6_* 工具返回。禁止用预训练知识、禁止直接读 data/*.sqlite、禁止复用本会话中没有工具出处的旧结论。
 - 数值纪律：凡是数（产出/成本/加成/伤害）一律来自工具返回的结构化字段或公式行（dimension + op + value）；文本只用于说明与审计，禁止从文字心算。
-- 内部 ID 的前缀不编码归属：例如 GOVERNOR_PROMOTION_EDUCATOR_* 在 BBG 里可能属于其他总督。总督/晋升归属只认 civi6_instance 的 governors 类里 gov 列（或 v_governor_promotion 视图），禁止按 ID 前缀、名称片段或旧对话推断。
+- 内部 ID 的前缀不编码归属：例如 GOVERNOR_PROMOTION_EDUCATOR_* 在不同数值层里可能属于其他总督。总督/晋升归属只认 civi6_instance 的 governors 类里 gov 列（或 v_governor_promotion 视图），禁止按 ID 前缀、名称片段或旧对话推断。
 - 行内 eff 是已解析的权威效果文本，fx 是可执行公式；unres 只是未解析机制计数（>0 即“数据层未解析”）。用户问效果时只引用 eff/fx，不要用记忆补写隐藏机制。
 - 决策数值来自 civi6_eval 的公式组合与计划带（empirical/rule）；基准节奏来自 civi6_pace（含 meta.checks 证书与 baseline.blockers），按回合求值来自 civi6_pace_eval；引用时保留 confidence/source，三者不要混用。
 - 成本与回合都带速度口径：行内 cost、eval 的 required/cut/deadline、pace 的 cost/slack 已按 speed 折算，basis 与 instance.costBasis 回显 costMultiplier 与 turnScale。不要再乘 50% 或在标准/联机之间二次换算；要换档就换实例的 speed 重新取。
-- 回答含文明6事实时，末尾加：数据依据：${label} / <entity ids>。
-- 用户要另一套规则时，说明需修改插件配置 ruleset 并重载，不能按调用切换。${excluded.length ? `\n- 可选子模组未启用：${excluded.join("、")}。` : ""}`;
+- 回答含文明6事实时，末尾加：数据依据：<层标签>（<层 id>） / <entity ids>。
+- 新增数值层：把符合契约的 *.sqlite 放进 layersDir 并重载插件；不需要改 ruleset/dbPaths 类型配置。${excluded.length ? `\n- 当前默认层未启用的可选子模组：${excluded.join("、")}；其他层见 civi6_meta.layers。` : ""}`;
 }
 
 export function apply(ctx, config = {}) {
@@ -5823,81 +6232,111 @@ export function apply(ctx, config = {}) {
       : resolve(PLUGIN_DIR, configuredRoot)
     : undefined;
 
-  const paths = {};
-  for (const source of SOURCES) {
-    const configured =
-      (config.dbPaths && config.dbPaths[source]) ||
-      (source === "vanilla" ? config.dbPath : undefined) ||
-      (source === "vanilla" ? process.env.CIVI6_DB_PATH : process.env.CIVI6_BBG_DB_PATH) ||
-      DEFAULT_DB_PATHS[source];
-    paths[source] = resolveDbPath(configured, workspaceRoot);
-  }
-
-  const ruleset = normalizeRuleset(config.ruleset ?? config.dataSource ?? process.env.CIVI6_DATA_SOURCE) ?? "vanilla";
+  const catalog = discoverLayers(config, workspaceRoot);
   const configuredPacingRoot = config.pacingRoot ? String(config.pacingRoot) : undefined;
   const pacingRoot = configuredPacingRoot
     ? isAbsolute(configuredPacingRoot)
       ? configuredPacingRoot
       : resolve(PLUGIN_DIR, configuredPacingRoot)
     : workspaceRoot ?? resolve(PLUGIN_DIR, "..");
-  const paceContext = { root: pacingRoot, source: ruleset };
-  const activePath = paths[ruleset];
-  if (!activePath) {
-    throw new Error(`civi6-kb: no database path configured for ruleset "${ruleset}"`);
-  }
+  const paceContext = { root: pacingRoot };
   const strictGrounding = config.strictGrounding !== false;
   const effectCardsRequired = config.effectCardsRequired !== false;
-  const summary = readMetaSummary(activePath);
-  const label = summary.ruleset?.labelZh ?? ruleset;
 
-  const effectCardsHint = ruleset === "bbg"
-    ? " Run `npm run effects:build:bbg` (with the plugin unloaded) to build the effect layer."
-    : " Run `npm run effects:build` (with the plugin unloaded) to build the effect layer.";
+  function effectCardsHint(entry) {
+    if (entry?.id === "bbg") {
+      return " Run `npm run effects:build:bbg` (with the plugin unloaded) to build the effect layer.";
+    }
+    if (entry?.id === "vanilla") {
+      return " Run `npm run effects:build` (with the plugin unloaded) to build the effect layer.";
+    }
+    return ` Rebuild the effect layer for layer "${entry?.id ?? "?"}" (with the plugin unloaded), then reload.`;
+  }
 
-  function validateKb(kb) {
+  function layerBuildHint(entry) {
+    if (entry?.id === "bbg") {
+      return ' Build it with "npm run build:bbg" (run "npm run fetch:bbg" first if BBG sources are missing).';
+    }
+    if (entry?.id === "vanilla") return ' Build it with "npm run build".';
+    return (
+      ` Build the database for layer "${entry?.id ?? "?"}" with _meta.ruleset.id and ` +
+      `_meta.build.dataSource matching, put it in ${catalog.dir}, then reload.`
+    );
+  }
+
+  function validateKb(kb, entry) {
     const meta = kb.meta();
     const build = meta.build && typeof meta.build === "object" ? meta.build : null;
     if (!meta.ruleset) {
-      throw new Error("civi6-kb: database has no _meta.ruleset; rebuild it with `npm run build` / `npm run build:bbg`.");
+      throw new Error(`数值层 "${entry.id}" 的数据库没有 _meta.ruleset；请重建该库。`);
     }
-    if (meta.ruleset.id !== ruleset) {
+    if (meta.ruleset.id !== entry.id) {
       throw new Error(
-        `civi6-kb: configured ruleset "${ruleset}" but database says "${meta.ruleset.id}" (${meta.dbFile}).`,
+        `数值层 "${entry.id}" 的库自述 _meta.ruleset.id="${meta.ruleset.id}"（${meta.dbFile}），拒绝服务。`,
       );
     }
-    if (build?.dataSource && build.dataSource !== ruleset) {
+    if (build?.dataSource && build.dataSource !== entry.id) {
       throw new Error(
-        `civi6-kb: configured ruleset "${ruleset}" but _meta.build.dataSource is "${build.dataSource}".`,
+        `数值层 "${entry.id}" 的 _meta.build.dataSource 是 "${build.dataSource}"（${meta.dbFile}），拒绝服务。`,
       );
     }
     if (meta.kb?.stale) {
-      throw new Error(
-        `civi6-kb: decision layer is stale (kb rawBuiltAt != build.builtAt). Rebuild KB for ${ruleset}.`,
-      );
+      throw new Error(`数值层 "${entry.id}" 的决策层过期（kb rawBuiltAt != build.builtAt）；请重建该层决策层。`);
     }
     if (effectCardsRequired && (!meta.effectCoverage || meta.effectCoverage.stale)) {
-      throw new Error(`civi6-kb: effect layer is missing or stale.${effectCardsHint}`);
+      throw new Error(`数值层 "${entry.id}" 的效果层缺失或过期。${effectCardsHint(entry)}`);
     }
-    if (ruleset === "bbg" && build?.bbg?.baseBuiltAt && paths.vanilla) {
-      const base = readMetaSummary(paths.vanilla);
-      if (base.build?.builtAt && base.build.builtAt !== build.bbg.baseBuiltAt) {
-        throw new Error(
-          "civi6-kb: BBG base is stale (vanilla DB was rebuilt after BBG). " +
-            "Unload the plugin and run `npm run rebuild:bbg`.",
-        );
+    if (entry.id === "bbg" && build?.bbg?.baseBuiltAt) {
+      const baseEntry = catalog.byId.get("vanilla");
+      if (baseEntry?.available) {
+        const base = readMetaSummary(baseEntry.dbFile);
+        if (base.build?.builtAt && base.build.builtAt !== build.bbg.baseBuiltAt) {
+          throw new Error(
+            "civi6-kb: BBG base is stale (vanilla DB was rebuilt after BBG). " +
+              "Unload the plugin and run `npm run rebuild:bbg`.",
+          );
+        }
       }
     }
     return meta;
   }
 
-  let cachedKb = null;
-  function getKb() {
-    if (cachedKb) return cachedKb;
+  const KB_CACHE_LIMIT = 3;
+  const kbCache = new Map();
+  function getKb(layerRef) {
+    const entry =
+      typeof layerRef === "string"
+        ? resolveLayerForTool(catalog, "civi6-kb", layerRef)
+        : layerRef ?? resolveLayerForTool(catalog, "civi6-kb", undefined);
+    const cached = kbCache.get(entry.id);
+    if (cached && cached.dbFile === entry.dbFile && cached.builtAt === entry.builtAt) {
+      // LRU: re-insert on hit.
+      kbCache.delete(entry.id);
+      kbCache.set(entry.id, cached);
+      return cached.kb;
+    }
+    if (cached) {
+      try {
+        cached.kb.close();
+      } catch {
+        /* ignore */
+      }
+      kbCache.delete(entry.id);
+    }
     let kb;
     try {
-      kb = createKnowledgeBase(activePath, ruleset);
-      validateKb(kb);
-      cachedKb = kb;
+      kb = createKnowledgeBase(entry.dbFile, entry.id);
+      validateKb(kb, entry);
+      kbCache.set(entry.id, { kb, dbFile: entry.dbFile, builtAt: entry.builtAt });
+      while (kbCache.size > KB_CACHE_LIMIT) {
+        const [oldId, hit] = kbCache.entries().next().value;
+        try {
+          hit.kb.close();
+        } catch {
+          /* ignore */
+        }
+        kbCache.delete(oldId);
+      }
       return kb;
     } catch (error) {
       try {
@@ -5906,20 +6345,17 @@ export function apply(ctx, config = {}) {
         /* ignore */
       }
       const message = error instanceof Error ? error.message : String(error);
-      const hint =
-        ruleset === "bbg"
-          ? ' Build it with "npm run build:bbg" (run "npm run fetch:bbg" first if BBG sources are missing).'
-          : ' Build it with "npm run build".';
-      throw new Error(`${message}${hint}`);
+      throw new Error(`${message}${layerBuildHint(entry)}`);
     }
   }
 
-  // The model sees the lock in every assembled prompt, not just in tool output.
+  // The model sees the layer catalog in every assembled prompt, not just in
+  // tool output. The catalog is discovered from DB metadata, never a config enum.
   ctx.effect(() => {
     const dispose = ctx.systemPrompt.section({
-      name: "civi6:ruleset-lock",
+      name: "civi6:numerical-layers",
       order: 700,
-      text: buildRulesetPrompt(summary.ruleset, summary.build),
+      text: buildLayerPrompt(catalog),
     });
     return () => dispose();
   });
@@ -5937,9 +6373,11 @@ export function apply(ctx, config = {}) {
   });
 
   // Strict grounding: make direct DB access through the shell fail loudly, and
-  // reject any stale per-call source argument on civi6_* tools.
+  // reject the retired per-call `source` argument on civi6_* tools.
   if (strictGrounding) {
-    const activeLower = String(activePath).replace(/\\/g, "/").toLowerCase();
+    const layerFiles = catalog.entries.map((entry) => String(entry.dbFile).replace(/\\/g, "/").toLowerCase());
+    const layerNames = catalog.entries.map((entry) => basename(entry.dbFile).toLowerCase());
+    const layersDirLower = String(catalog.dir).replace(/\\/g, "/").toLowerCase();
     const allowMaintenance =
       /\bnpm\s+run\s+(build|rebuild|build:bbg|rebuild:bbg|build:all|fetch:bbg|reindex|reindex:bbg|effects:build|effects:build:bbg|kb:build|kb:build:bbg|verify|kb:verify|verify:effects)\b/i;
     ctx.effect(() => {
@@ -5947,7 +6385,7 @@ export function apply(ctx, config = {}) {
         if (typeof exec.name === "string" && exec.name.startsWith("civi6_")) {
           const args = exec.arguments;
           if (args && typeof args === "object" && Object.prototype.hasOwnProperty.call(args, "source")) {
-            return "civi6-kb: ruleset is locked by plugin config. Change `ruleset` and reload; per-call source is not allowed.";
+            return "civi6-kb: 旧参数 `source` 已退役；用 `layer` 选择数值层（可用值见 civi6_meta.layers）。";
           }
           return undefined;
         }
@@ -5957,14 +6395,17 @@ export function apply(ctx, config = {}) {
         if (!command) return undefined;
         const normalized = command.replace(/\\/g, "/").toLowerCase();
         const touches =
-          normalized.includes(activeLower) ||
+          layerFiles.some((file) => file && normalized.includes(file)) ||
+          layerNames.some((name) => name && normalized.includes(name)) ||
+          (normalized.includes("data/") && normalized.includes(".sqlite")) ||
+          (normalized.includes(layersDirLower) && normalized.includes(".sqlite")) ||
           normalized.includes("civi6.sqlite") ||
           normalized.includes("civi6-bbg.sqlite");
         if (!touches) return undefined;
         if (allowMaintenance.test(normalized)) return undefined;
         return (
           `civi6-kb: direct Civ6 database access is disabled by strictGrounding. ` +
-          `Active ruleset: ${label}. Use the civi6_* tools instead.`
+          `可用数值层：${layerListText(catalog)}。Use the civi6_* tools instead.`
         );
       });
       return () => dispose();
@@ -5983,18 +6424,21 @@ export function apply(ctx, config = {}) {
   // measured session needed 39 of those calls for ~180KB of text).
   // The old exploration surface (plan / search / entities / modifiers / schema)
   // is no longer registered either: it existed to compensate for the missing packet.
-  ctx.tools.register(metaTool(getKb));
-  ctx.tools.register(instanceTool(getKb));
-  ctx.tools.register(evalTool(getKb));
-  ctx.tools.register(paceTool(getKb, paceContext));
+  ctx.tools.register(metaTool(getKb, () => catalog));
+  ctx.tools.register(instanceTool(getKb, () => catalog));
+  ctx.tools.register(evalTool(getKb, () => catalog));
+  ctx.tools.register(paceTool(getKb, () => catalog, paceContext));
   ctx.tools.register(paceEvalTool(getKb, paceContext));
 
   ctx.effect(() => () => {
-    try {
-      cachedKb?.close();
-    } catch {
-      /* ignore */
+    for (const hit of kbCache.values()) {
+      try {
+        hit.kb.close();
+      } catch {
+        /* ignore */
+      }
     }
-    cachedKb = null;
+    kbCache.clear();
+    INSTANCE_CACHE.clear();
   });
 }

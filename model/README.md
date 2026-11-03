@@ -111,4 +111,4 @@
 
 ## 数据溯源
 
-模型数据全部来自工作区《文明6》SQLite 数据库（`data/civi6.sqlite`，当前约 478 张表 / 53,540 行 / 约 1,700 篇实体文档，Base + R&F + GS + 全 DLC；BBG 为覆盖库）。当前运行期锁定 BBG 7.5.1，实际数值以 `civi6_*` 工具返回为准。决策层重建设有 16 张 `kb_*` 表；效果事实层另有 `effect_cards` / `modifier_text` / `requirement_text`。各章引用的关键表：Technologies / Civics / Eras(_XP1/_XP2) / GlobalParameters / Boosts / Districts / Buildings / Happinesses / MajorStartingUnits / Units / Modifiers(+Arguments) 等；数值均经 `PRAGMA table_info` + SELECT 实测，公式参数均标注参数名。
+模型数据全部来自工作区《文明6》SQLite 数据库（`data/civi6.sqlite`，当前约 478 张表 / 53,540 行 / 约 1,700 篇实体文档，Base + R&F + GS + 全 DLC；BBG 为覆盖库）。当前运行期通过 `layer` 选择数值层（省略时用 defaultLayer 或唯一可用层；BBG 7.5.1 是基线之一），实际数值以 `civi6_*` 工具返回为准。决策层重建设有 16 张 `kb_*` 表；效果事实层另有 `effect_cards` / `modifier_text` / `requirement_text`。各章引用的关键表：Technologies / Civics / Eras(_XP1/_XP2) / GlobalParameters / Boosts / Districts / Buildings / Happinesses / MajorStartingUnits / Units / Modifiers(+Arguments) 等；数值均经 `PRAGMA table_info` + SELECT 实测，公式参数均标注参数名。

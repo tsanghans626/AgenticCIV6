@@ -102,12 +102,13 @@ CLI 产物面向人（可 import 的 `.mjs`、`--format`、`--out`）；agent �
 
 | 工具 | 输入 | 输出 | 说明 |
 | --- | --- | --- | --- |
-| `civi6_pace` | `civ`（`CIVILIZATION_*`）、`leader?`（`LEADER_*`）、`speed`、`victory`、`assurance?`、`targetTurn?`、`difficulty?`、`formula?` | `functionSet`（`civi6.pacing/formula/v1`）+ `handle` | **只接受 instance 已解析的精确 id**，拒绝名字/中文名/`format`/`out`/`source`；`formula:false` 只回 `summary`（= `formula.meta`）+ handle。 |
-| `civi6_pace_eval` | `handle`（或字面 `functionSet`）+ `calls[{fn,t?,key?,from?,to?,limit?,id?}]` | 与生成模块逐回合一致的求值结果 | 1–24 条调用；`milestones` 是窗口 + `limit`，返回 `{total,rows}`；超 24KB 整批报错，不截断。 |
+| `civi6_pace` | `layer?`、`civ`（`CIVILIZATION_*`）、`leader?`（`LEADER_*`）、`speed`、`victory`、`assurance?`、`targetTurn?`、`difficulty?`、`formula?` | `functionSet`（`civi6.pacing/formula/v1`）+ `handle`（携带层 id） | **只接受 instance 已解析的精确 id**；`layer` 从 `civi6_meta.layers` 取；拒绝名字/中文名/`format`/`out`/`source`；`formula:false` 只回 `summary`（= `formula.meta`）+ handle。 |
+| `civi6_pace_eval` | `handle`（或字面 `functionSet`）+ `calls[{fn,t?,key?,from?,to?,limit?,id?}]` | 与生成模块逐回合一致的求值结果；`layer` 从 handle/functionSet 继承 | 1–24 条调用；`milestones` 是窗口 + `limit`，返回 `{total,rows}`；超 24KB 整批报错，不截断。 |
 
 ```js
 // 1) 构建一次（精确 id 来自 civi6_instance → core）
 const pace = await tools.civi6_pace({
+  layer: "bbg",
   civ: "CIVILIZATION_KOREA", leader: "LEADER_SEONDEOK", speed: "online", victory: "science",
 });
 // pace.functionSet.T / base / delta / counts / ids / labels / actions / milestones / meta
@@ -130,7 +131,7 @@ await tools.civi6_pace_eval({
 
 - **`T` 是函数域**（`series` 末回合 = `selfTurn`/`burstTurn`），不是胜利回合；`meta.baseline.turn` 可能更晚（科学线加飞行回合）。例：BBG 罗马标准科学 `T=364`、`baseline.turn=414`。
 - **边界**：`t` 向下取整；`t<1` → 0/空；`t>T` → 末值并标 `clamped:true`；非数字 → 报错。`milestones` 的 `deps` 恒为 `[]`（函数集不携带依赖图）。
-- **handle**：`pc1.<base64url>`，编码构建输入 + `_meta.build`/`kb.build` 指纹；执行器先校验再求值，知识库重建后旧 handle 会被拒绝。
+- **handle**：`pc1.<base64url>`，编码层 id + 构建输入 + `_meta.build`/`kb.build` 指纹；`civi6_pace_eval` 按 handle 的层打开库并校验构建时间戳，知识库重建后旧 handle 会被拒绝。handle 的层可以是任意已发现数值层，不再限定 vanilla/bbg。
 - **构建前置**：`src/pacing` 需编译到 `dist/pacing`：
 
   ```bash

@@ -43,8 +43,8 @@ L5   检索          kb_card / v_kb_* 视图 / search_docs（BM25 倒排索引�
 
 ```
 dsh-plugin/            插件接入层（运行时，零 npm 依赖，直接用 node:sqlite 读库）
-  index.js             5 个工具 + 单规则锁定 + 系统提示 + 严格 guard + 数据类包组装
-  cordis.patch.yml     注入配置（ruleset + 两个 dbPaths + pacingRoot）
+  index.js             5 个工具 + 数值层目录/按调用选层 + 系统提示 + 严格 guard + 数据类包组装
+  cordis.patch.yml     注入配置（layersDir + 可选 defaultLayer + pacingRoot）
   package.json / locale/ / icon.svg
 src/                   构建管线（把游戏/BBG 数据摄取成 SQLite）
   cli.ts / build.ts    命令入口与构建编排
@@ -91,7 +91,7 @@ BBG 库记录基座库的构建时间；标准库重建后再跑 `npm run build:
 
 构建期写 `_meta.ruleset`：规则 id、中文标签、资料片、DLC 列表、BBG ref/版本、被排除的可选子模组、构建时间与来源目录。
 
-插件只打开配置指定的 `ruleset`，并校验 `_meta.build.dataSource`、`_meta.ruleset.id`、`_meta.effects.rawBuiltAt`、`kb.build.rawBuiltAt` 与 BBG 基座时间戳；任何不一致都拒绝启动，而不是降级到"凭记忆回答"。
+插件扫描 `layersDir` 下的 `*.sqlite`，逐个读取 `_meta.ruleset` 自动注册数值层；每次调用用 `layer` 选择库。打开某层时校验 `_meta.build.dataSource`、`_meta.ruleset.id`、`_meta.effects.rawBuiltAt`、`kb.build.rawBuiltAt` 与 BBG 基座时间戳；任何不一致都拒绝该层，而不是降级到"凭记忆回答"。层 id 重复、库缺少 `_meta.ruleset`、请求层未知都在 `civi6_meta.layers`/工具错误里显式报出。
 
 ### 3.4 当前构建指纹
 
@@ -163,7 +163,7 @@ scope + dimension + op + value (+ per + condition)
 
 ## 7. 数据面契约
 
-模型面有 5 个工具（见 [接入方式](INTEGRATION.md)），其中取数只有 `civi6_instance` 一个入口，它是 **objective-free** 的：只由硬约束（文明/领袖/速度/难度）决定，一次调用返回**一类数据**。
+模型面有 5 个工具（见 [接入方式](INTEGRATION.md)），其中取数只有 `civi6_instance` 一个入口，它是 **objective-free** 的：只由硬约束（数值层/文明/领袖/速度/难度）决定，一次调用返回**一类数据**。
 
 - 先取 `core`（硬约束 + 文明套件全文 + 城邦 + 中性索引 + 全局参数子集 + `gaps`/`omitted` + `manifest.classes`），再按 `manifest[].whenToUse` 只取问题涉及的 2~5 类。
 - 11 个数据类（含 `core`）：`core` / `tech-tree` / `civic-tree` / `units` / `districts` / `buildings` / `tiles` / `multipliers` / `beliefs` / `promotions` / `governors`。

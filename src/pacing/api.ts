@@ -1,4 +1,3 @@
-import type { DataSource } from "../config.js";
 import type { KnowledgeDb } from "../db.js";
 import type { VictoryId } from "../kb/spec.js";
 import { buildPacing } from "./engine.js";
@@ -20,7 +19,7 @@ import type { Assurance } from "./spec.js";
  * closed.
  */
 export interface PaceBuildRequest {
-  source: DataSource;
+  source: string;
   /** Exact `instance.instance.civ` id (`CIVILIZATION_*`). */
   civ: string;
   /** Exact `instance.instance.leader` id (`LEADER_*`); required when the civ has several. */

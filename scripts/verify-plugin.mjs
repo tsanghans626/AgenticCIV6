@@ -3,10 +3,13 @@ import { existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { apply, createKnowledgeBase, renderToolPayload } from "../dsh-plugin/index.js";
-import { buildPacing, encodePaceHandle, makePacingFunctions, PACE_CALL_FNS } from "../dist/pacing/index.js";
+import { buildPacing, decodePaceHandle, encodePaceHandle, makePacingFunctions, PACE_CALL_FNS } from "../dist/pacing/index.js";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const dbFile = process.env.CIVI6_BBG_DB_PATH?.trim() || join(root, "data", "civi6-bbg.sqlite");
+const vanillaDbFile = process.env.CIVI6_DB_PATH?.trim() || join(root, "data", "civi6.sqlite");
+const layersDir = dirname(dbFile);
+const hasVanilla = existsSync(vanillaDbFile);
 
 const CLASSES = [
   "core",
@@ -118,7 +121,9 @@ try {
   const meta = kb.meta();
   const metaChars = JSON.stringify(meta).length;
   assert.equal(meta.ruleset?.id, "bbg", "ruleset.id 不是 bbg");
-  assert.equal(meta.locked, true, "locked 不为 true");
+  assert.equal(meta.locked, false, "locked 应为 false（层按调用选择）");
+  assert.equal(meta.readOnly, true, "readOnly 不为 true");
+  assert.equal(meta.layerSelection, "per-call", "layerSelection 不是 per-call");
   assert.ok(meta.effectCoverage?.cards > 0, "效果卡为空");
   assert.equal(meta.effectCoverage.stale, false, "效果层过期");
   assert.ok(metaChars < 6000, `meta 默认载荷 ${metaChars}B 仍过大（verbose 字段没有收进 verbose）`);
@@ -127,7 +132,7 @@ try {
   assert.equal(meta.entityTypes, undefined, "entityTypes 仍在默认载荷里");
   assert.ok(kb.meta({ verbose: true }).entityTypes?.length > 0, "verbose 缺少 entityTypes");
   assertLossless(meta);
-  console.log(`✓ meta：bbg / locked / effectCoverage / ${metaChars}B`);
+  console.log(`✓ meta：bbg / per-call layers / effectCoverage / ${metaChars}B`);
 
   const workEthic = kb.entityDetail("belief", "BELIEF_WORK_ETHIC");
   assert.match(workEthic.description_zh, /神社和寺庙分别提供\+2和\+4/, workEthic.description_zh);
@@ -583,7 +588,7 @@ try {
       systemPrompt: { section: () => () => {} },
       effect: () => () => {},
     },
-    { ruleset: "bbg", dbPaths: { bbg: dbFile }, effectCardsRequired: true, strictGrounding: false },
+    { layersDir, defaultLayer: "bbg", effectCardsRequired: true, strictGrounding: false },
   );
   const expectedTools = ["civi6_instance", "civi6_eval", "civi6_meta", "civi6_pace", "civi6_pace_eval"];
   for (const name of expectedTools) {
@@ -603,6 +608,7 @@ try {
   assert.deepEqual(Object.keys(registered).sort(), [...expectedTools].sort(), "模型面工具数不是 5");
 
   const hostCore = await registered.civi6_instance.execute({
+    layer: "bbg",
     civ: "Russia",
     leader: "Peter",
     speed: "online",
@@ -614,6 +620,7 @@ try {
   assert.ok(hostCoreText.length <= 44000, `host core ${hostCoreText.length} > 44000`);
 
   const hostBeliefs = await registered.civi6_instance.execute({
+    layer: "bbg",
     civ: "Byzantium",
     leader: "Basil II",
     speed: "online",
@@ -621,7 +628,94 @@ try {
   });
   assert.ok(hostBeliefs.content.belief.rows.length > 0, "host beliefs 行为空");
 
+  // --- numerical layers: one session, multiple databases --------------------
+  const hostMeta = await registered.civi6_meta.execute({});
+  assert.equal(hostMeta.layerSelection, "per-call", "meta.layerSelection");
+  assert.equal(hostMeta.locked, false, "meta.locked");
+  assert.equal(hostMeta.readOnly, true, "meta.readOnly");
+  assert.ok(Array.isArray(hostMeta.layers) && hostMeta.layers.length >= 1, "meta 缺 layers");
+  assert.ok(hostMeta.layers.some((l) => l.id === "bbg" && l.default === true), "bbg 未标记默认层");
+  assert.ok(hostMeta.layers.find((l) => l.id === "bbg")?.dbFile, "bbg 缺 dbFile");
+  const hostMetaBbg = await registered.civi6_meta.execute({ layer: "bbg" });
+  assert.equal(hostMetaBbg.ruleset?.id, "bbg", "meta(layer=bbg) ruleset");
+  assert.equal(hostMetaBbg.defaultLayer, "bbg", "meta defaultLayer");
+
+  assert.equal(hostCore.meta.layer.id, "bbg", "host core layer");
+  assert.equal(hostCore.layer.id, "bbg", "host core page layer");
+  assert.equal(hostCore.meta.ruleset, "bbg", "host core ruleset");
+  assert.equal(hostCore.instance.layer, "bbg", "instance.layer");
+
+  if (hasVanilla) {
+    const vanillaCore = await registered.civi6_instance.execute({
+      layer: "vanilla",
+      civ: "Russia",
+      leader: "Peter",
+      speed: "online",
+      section: "core",
+    });
+    assert.equal(vanillaCore.meta.layer.id, "vanilla", "vanilla core layer");
+    assert.equal(vanillaCore.meta.ruleset, "vanilla", "vanilla core ruleset");
+    assert.ok(vanillaCore.meta.layer.dbFile, "vanilla dbFile");
+    assert.equal(vanillaCore.instance.layer, "vanilla", "vanilla instance.layer");
+
+    const aliasCore = await registered.civi6_instance.execute({
+      layer: "标准包",
+      civ: "Russia",
+      leader: "Peter",
+      speed: "online",
+      section: "core",
+    });
+    assert.equal(aliasCore.meta.layer.id, "vanilla", "标准包 别名");
+
+    // Cache isolation: bbg again after vanilla must still be bbg.
+    const bbgAgain = await registered.civi6_instance.execute({
+      layer: "bbg",
+      civ: "Russia",
+      leader: "Peter",
+      speed: "online",
+      section: "core",
+    });
+    assert.equal(bbgAgain.meta.layer.id, "bbg", "缓存串层");
+    assert.equal(bbgAgain.layer.id, "bbg", "缓存串层(page)");
+
+    const vanillaEval = await registered.civi6_eval.execute({
+      layer: "vanilla",
+      builds: ["BUILDING_LIBRARY"],
+      speed: "online",
+    });
+    assert.equal(vanillaEval.layer, "vanilla", "eval layer");
+    assert.ok(Array.isArray(vanillaEval.metrics), "vanilla eval 缺 metrics");
+
+    const vanillaPace = await registered.civi6_pace.execute({
+      layer: "vanilla",
+      civ: "CIVILIZATION_KOREA",
+      leader: "LEADER_SEONDEOK",
+      speed: "online",
+      victory: "science",
+      formula: false,
+    });
+    assert.equal(vanillaPace.layer, "vanilla", "pace layer");
+    assert.equal(decodePaceHandle(vanillaPace.handle).source, "vanilla", "handle source");
+    const vanillaPaceEval = await registered.civi6_pace_eval.execute({
+      handle: vanillaPace.handle,
+      calls: [{ fn: "baseline" }],
+    });
+    assert.equal(vanillaPaceEval.layer, "vanilla", "pace_eval layer");
+    assert.ok(vanillaPaceEval.results[0].value?.turn > 0, "pace_eval baseline");
+  }
+
+  await assert.rejects(
+    () => registered.civi6_instance.execute({ layer: "no-such-layer", section: "core" }),
+    /未知数值层/,
+    "未知层没有报错",
+  );
+
+  console.log(
+    `✓ layers：${hasVanilla ? "vanilla ↔ bbg 同会话切换 / " : ""}meta 目录 / eval 同层 / pace handle 携带层 / 未知层报错`,
+  );
+
   const hostEval = await registered.civi6_eval.execute({
+    layer: "bbg",
     builds: ["BUILDING_LIBRARY"],
     gates: ["CIVIC_HUMANISM"],
     cities: 4,
@@ -641,7 +735,11 @@ try {
   // --- pacing: build the function set once, evaluate by explicit calls ------
   const paceParams = registered.civi6_pace.parameters;
   assert.deepEqual(paceParams.required, ["civ", "speed", "victory"], `pace required=${JSON.stringify(paceParams.required)}`);
-  assert.equal(paceParams.properties.source, undefined, "pace 不应暴露 source（规则锁定）");
+  assert.equal(paceParams.properties.source, undefined, "pace 不应暴露 source（用 layer）");
+  assert.ok(paceParams.properties.layer, "pace 缺 layer 参数");
+  assert.ok(registered.civi6_meta.parameters.properties.layer, "meta 缺 layer 参数");
+  assert.ok(registered.civi6_eval.parameters.properties.layer, "eval 缺 layer 参数");
+  assert.ok(registered.civi6_instance.parameters.properties.layer, "instance 缺 layer 参数");
   assert.equal(paceParams.properties.format, undefined, "pace 不应暴露 format（面向数据）");
   assert.ok(paceParams.properties.formula, "pace 缺 formula 开关");
   assert.deepEqual(
@@ -651,6 +749,7 @@ try {
   );
 
   const pace = await registered.civi6_pace.execute({
+    layer: "bbg",
     civ: "CIVILIZATION_KOREA",
     leader: "LEADER_SEONDEOK",
     speed: "online",
@@ -834,6 +933,85 @@ try {
     `✓ host：工具面 ${Object.keys(registered).length} 个 / core ${hostCore.integrity.rows} 行 / eval 账本 ${hostEval.ledger.length} 币种 / ` +
       `句柄 ${tagmaHandle}→甲胄、${buildingHandle}→图书馆`,
   );
+
+  // --- no type config: layers are explicit when more than one exists ------
+  const registeredNoDefault = {};
+  apply(
+    {
+      tools: { register: (tool) => { registeredNoDefault[tool.name] = tool; }, guard: () => () => {} },
+      systemPrompt: { section: () => () => {} },
+      effect: () => () => {},
+    },
+    { layersDir, effectCardsRequired: true, strictGrounding: false },
+  );
+  const noDefaultMeta = await registeredNoDefault.civi6_meta.execute({});
+  if (hasVanilla) {
+    assert.equal(noDefaultMeta.defaultLayer, null, "多库无 defaultLayer 时不应伪造默认层");
+    await assert.rejects(
+      () => registeredNoDefault.civi6_instance.execute({ section: "core" }),
+      /未指定数值层/,
+      "多库无默认层且未传 layer 时没有报错",
+    );
+    const explicitLayer = await registeredNoDefault.civi6_instance.execute({
+      layer: "bbg",
+      civ: "Russia",
+      leader: "Peter",
+      speed: "online",
+      section: "core",
+    });
+    assert.equal(explicitLayer.meta.layer.id, "bbg", "显式 layer 未生效");
+  } else {
+    assert.equal(noDefaultMeta.defaultLayer, "bbg", "单库应自动成为默认层");
+  }
+
+  // --- legacy config shim: old ruleset/dbPaths still work, with warnings ---
+  const registeredLegacy = {};
+  apply(
+    {
+      tools: { register: (tool) => { registeredLegacy[tool.name] = tool; }, guard: () => () => {} },
+      systemPrompt: { section: () => () => {} },
+      effect: () => () => {},
+    },
+    { ruleset: "bbg", dbPaths: { bbg: dbFile }, effectCardsRequired: true, strictGrounding: false },
+  );
+  const legacyMeta = await registeredLegacy.civi6_meta.execute({});
+  assert.equal(legacyMeta.defaultLayer, "bbg", "旧 ruleset 未映射为 defaultLayer");
+  assert.ok(
+    Array.isArray(legacyMeta.warnings) && legacyMeta.warnings.some((w) => /ruleset\/dataSource/.test(w)),
+    `旧配置缺少 warning：${JSON.stringify(legacyMeta.warnings)}`,
+  );
+  const legacyCore = await registeredLegacy.civi6_instance.execute({
+    civ: "Russia",
+    leader: "Peter",
+    speed: "online",
+    section: "core",
+  });
+  assert.equal(legacyCore.meta.layer.id, "bbg", "旧配置默认层未生效");
+
+  // --- strict grounding: every discovered layer DB is blocked ---------------
+  const guardFns = [];
+  apply(
+    {
+      tools: { register: () => {}, guard: (fn) => { guardFns.push(fn); return () => {}; } },
+      systemPrompt: { section: () => () => {} },
+      effect: (fn) => { const dispose = fn(); return () => dispose?.(); },
+    },
+    { layersDir, defaultLayer: "bbg", effectCardsRequired: true, strictGrounding: true },
+  );
+  assert.equal(guardFns.length, 1, "strictGrounding guard 未注册");
+  const guard = guardFns[0];
+  assert.match(
+    String(guard({ name: "bash", arguments: { command: `sqlite3 ${dbFile} .tables` } }) ?? ""),
+    /strictGrounding/,
+    "直读层数据库没有被拦截",
+  );
+  assert.match(
+    String(guard({ name: "civi6_instance", arguments: { source: "bbg" } }) ?? ""),
+    /source/,
+    "旧 source 参数没有被拒绝",
+  );
+  assert.equal(guard({ name: "bash", arguments: { command: "npm run verify:effects" } }), undefined, "维护命令被误拦");
+  console.log("✓ layers：无默认层需显式 layer / 旧配置 shim / strictGrounding 拦截");
 
   console.log("\n插件门面校验通过 ✅");
 } finally {
